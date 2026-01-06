@@ -7,6 +7,7 @@ import { LoginPage } from './pages/LoginPage';
 import { OnboardingPage } from './pages/OnboardingPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { PlansPage } from './pages/PlansPage';
+import { UpdatePasswordPage } from './pages/UpdatePasswordPage'; // Importação da nova página
 import { Layout } from './components/Layout';
 import { Dashboard } from './components/Dashboard';
 import { ProductionOrderList } from './components/ProductionOrderList';
@@ -30,6 +31,9 @@ function App() {
         <Routes>
           {/* Rota Pública - Login */}
           <Route path="/login" element={<LoginPage />} />
+
+          {/* Rota de Recuperação de Senha - O link do email redireciona para cá */}
+          <Route path="/update-password" element={<UpdatePasswordPage />} />
 
           {/* Rota Protegida Especial - Onboarding */}
           <Route path="/onboarding" element={
