@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
 import { MockService } from '../services/mockDb';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList } from 'lucide-react';
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, QrCode } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 // ... existing helper functions (getColorStyle, StatusBadge, SizeColorMatrix) ...
@@ -67,7 +67,7 @@ const SizeColorMatrix = ({ items, sizes }: { items: any[], sizes: string[] }) =>
 
   return (
     <div className="border rounded-lg relative">
-      <div className="absolute top-2 right-2">
+      <div className="absolute top-2 right-2 no-print">
           <button onClick={copyToClipboard} className="p-1 hover:bg-gray-200 rounded text-gray-500" title="Copiar Grade">
               <Copy size={16}/>
           </button>
@@ -140,9 +140,31 @@ export const ProductionOrderList: React.FC = () => {
   const [revisionForm, setRevisionForm] = useState<any>({});
   const [packingForm, setPackingForm] = useState<any>({});
 
+  // QR CODE GENERATION STATE
+  const [qrToken, setQrToken] = useState<string | null>(null);
+  const [qrExpiry, setQrExpiry] = useState<string | null>(null);
+
   useEffect(() => {
     loadData();
   }, []);
+
+  // NEW: Generate QR when label modal opens
+  useEffect(() => {
+      if (selectedOp && isLabelModalOpen) {
+          const fetchQr = async () => {
+              if (selectedOp.activeLink) {
+                  setQrToken(selectedOp.activeLink.token);
+                  setQrExpiry(selectedOp.activeLink.expiresAt);
+              } else {
+                  // Generate new
+                  const link = await MockService.generateProductionLink(selectedOp.id);
+                  setQrToken(link.token);
+                  setQrExpiry(link.expiresAt);
+              }
+          };
+          fetchQr();
+      }
+  }, [selectedOp, isLabelModalOpen]);
 
   const loadData = async () => {
     const [orders, prods] = await Promise.all([
@@ -177,7 +199,7 @@ export const ProductionOrderList: React.FC = () => {
     setPackingForm(op.packingDetails || { totalBoxes: 0, packingType: 'Caixa Padrão', totalPackedQty: 0 });
   };
 
-  // --- NEW: Handle Consolidated Batch View ---
+  // ... (Rest of existing logic: handleViewBatch, getActiveSizes, filteredOps, groupedOps, stats, actions) ...
   const handleViewBatch = (e: React.MouseEvent, groupOps: ProductionOrder[]) => {
       e.stopPropagation();
       if (groupOps.length === 0) return;
@@ -210,7 +232,6 @@ export const ProductionOrderList: React.FC = () => {
       return tp?.activeSizes || prod?.sizes || [];
   };
 
-  // --- Filter Logic ---
   const subcontractors = useMemo(() => {
       return Array.from(new Set(ops.map(o => o.subcontractor).filter(Boolean)));
   }, [ops]);
@@ -218,14 +239,10 @@ export const ProductionOrderList: React.FC = () => {
   const filteredOps = useMemo(() => {
       return ops.filter(op => {
           const prod = products.find(p => p.id === op.productId);
-          
-          // Search Text (Lot, SKU, Product Name)
           const searchMatch = !filters.search || 
               op.lotNumber.toLowerCase().includes(filters.search.toLowerCase()) ||
               prod?.name.toLowerCase().includes(filters.search.toLowerCase()) ||
               prod?.sku.toLowerCase().includes(filters.search.toLowerCase());
-
-          // Status Filter (Including Late Logic)
           let statusMatch = true;
           if (filters.status === 'LATE') {
               const isLate = new Date(op.dueDate) < new Date() && op.status !== OrderStatus.COMPLETED && op.status !== OrderStatus.CANCELLED;
@@ -233,47 +250,30 @@ export const ProductionOrderList: React.FC = () => {
           } else {
               statusMatch = !filters.status || op.status === filters.status;
           }
-
-          // Subcontractor Filter
           const subMatch = !filters.subcontractor || op.subcontractor === filters.subcontractor;
-
-          // Date Range (Start Date)
           const opDate = new Date(op.startDate).setHours(0,0,0,0);
           const startFilter = filters.dateStart ? new Date(filters.dateStart).setHours(0,0,0,0) : null;
           const endFilter = filters.dateEnd ? new Date(filters.dateEnd).setHours(23,59,59,999) : null;
-
           const dateMatch = (!startFilter || opDate >= startFilter) &&
                             (!endFilter || opDate <= endFilter);
-
           return searchMatch && statusMatch && subMatch && dateMatch;
       });
   }, [ops, products, filters]);
 
-  // --- GROUPING LOGIC ---
   const groupedOps = useMemo<Record<string, ProductionOrder[]>>(() => {
       const groups: Record<string, ProductionOrder[]> = {};
-      
       filteredOps.forEach(op => {
-          // Extract base lot number (e.g., 2025-050 from 2025-050-A)
-          // Assumption: Format is YYYY-NNN or YYYY-NNN-SUFFIX
           const parts = op.lotNumber.split('-');
           let baseLot = op.lotNumber;
           if (parts.length >= 3) {
               baseLot = `${parts[0]}-${parts[1]}`;
           }
-          
           if (!groups[baseLot]) groups[baseLot] = [];
           groups[baseLot].push(op);
       });
-      
       return groups;
   }, [filteredOps]);
 
-  const clearFilters = () => {
-      setFilters({ search: '', status: '', subcontractor: '', dateStart: '', dateEnd: '' });
-  };
-
-  // --- Status Summary Stats ---
   const stats = useMemo(() => {
       const counts = {
           TOTAL: ops.length,
@@ -292,11 +292,8 @@ export const ProductionOrderList: React.FC = () => {
       return counts;
   }, [ops]);
 
-  // --- Actions ---
-
   const handleEditBatch = (e: React.MouseEvent, groupOps: ProductionOrder[]) => {
       e.stopPropagation();
-      // Only allow if all ops are DRAFT or PLANNED
       const canEdit = groupOps.every(o => o.status === OrderStatus.DRAFT || o.status === OrderStatus.PLANNED);
       if (!canEdit) {
           alert("Apenas OPs em 'Rascunho' ou 'Planejado' podem ser editadas em lote. Utilize 'Gerenciar' para OPs em andamento.");
@@ -342,7 +339,6 @@ export const ProductionOrderList: React.FC = () => {
 
   const renderRiskPlanning = (op: ProductionOrder) => {
       if (!op.cuttingDetails) return <p className="text-gray-400 text-sm">Sem planejamento de corte.</p>;
-      
       const { plannedMatrix, plannedLayers } = op.cuttingDetails;
       return (
           <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-6">
@@ -376,9 +372,97 @@ export const ProductionOrderList: React.FC = () => {
       );
   };
 
+  // --- FULL A4 PRINT LAYOUT WITH QR CODE ---
+  const renderA4CuttingOrder = () => {
+      if (!selectedOp) return null;
+      const prod = products.find(p => p.id === selectedOp.productId);
+      const today = new Date().toLocaleDateString();
+      const qrUrl = qrToken ? `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://bhub.app/portal/${qrToken}` : '';
+
+      return (
+          <div className="w-[210mm] min-h-[297mm] bg-white p-12 mx-auto shadow-2xl printable-sheet text-gray-900 font-sans relative flex flex-col justify-between">
+              <div>
+                  {/* Header */}
+                  <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-6">
+                      <div>
+                          <h1 className="text-3xl font-bold uppercase">Ordem de Produção</h1>
+                          <div className="text-lg font-mono font-bold mt-1">Lote: {selectedOp.lotNumber}</div>
+                      </div>
+                      <div className="text-right">
+                          <div className="text-sm font-bold">Data Emissão: {today}</div>
+                          <div className="text-sm">Entrega: {new Date(selectedOp.dueDate).toLocaleDateString()}</div>
+                      </div>
+                  </div>
+
+                  {/* Product Info */}
+                  <div className="grid grid-cols-2 gap-8 mb-8">
+                      <div>
+                          <h3 className="font-bold text-sm uppercase mb-1">Produto</h3>
+                          <div className="text-xl font-bold">{prod?.sku}</div>
+                          <div>{prod?.name}</div>
+                      </div>
+                      <div>
+                          <h3 className="font-bold text-sm uppercase mb-1">Informações</h3>
+                          <div>Qtd Total: <b>{selectedOp.quantityTotal}</b></div>
+                          <div>Facção: <b>{selectedOp.subcontractor || 'Interno'}</b></div>
+                      </div>
+                  </div>
+
+                  {/* Grade Matrix */}
+                  <div className="mb-8">
+                      <h3 className="font-bold text-sm uppercase mb-2 border-b border-black pb-1">Grade de Produção</h3>
+                      <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
+                  </div>
+
+                  {/* Observations */}
+                  <div className="border border-black p-4 min-h-[150px] mb-8 relative">
+                      <div className="absolute top-0 left-0 bg-black text-white px-2 py-1 text-xs font-bold">Observações</div>
+                      <div className="mt-4 text-sm">
+                          {/* Placeholder for future observations field */}
+                          - Seguir rigorosamente a ficha técnica.
+                          <br/>- Atenção ao sentido do fio.
+                      </div>
+                  </div>
+              </div>
+
+              {/* FOOTER WITH QR CODE */}
+              <div className="border-t-2 border-black pt-6 flex justify-between items-center mt-auto">
+                  <div>
+                      <div className="text-xs uppercase font-bold text-gray-500 mb-1">Instruções para Facção / Corte</div>
+                      <p className="text-sm font-bold max-w-xs">
+                          Escaneie o código ao lado para acessar o portal, visualizar a ficha técnica e lançar a produção.
+                      </p>
+                  </div>
+                  
+                  {/* QR Code Container */}
+                  <div className="flex items-center gap-4 bg-gray-50 p-2 border border-gray-300 rounded">
+                      {qrToken ? (
+                          <>
+                              <img src={qrUrl} alt="QR Code Produção" className="w-24 h-24 mix-blend-multiply" />
+                              <div className="text-right">
+                                  <div className="text-[10px] font-bold text-gray-400 uppercase">Token de Acesso</div>
+                                  <div className="font-mono font-bold text-lg">{qrToken.substring(0, 8)}...</div>
+                                  <div className="text-[10px] text-gray-500 mt-1">
+                                      Válido até:<br/>
+                                      <b>{new Date(qrExpiry || '').toLocaleDateString()}</b>
+                                  </div>
+                              </div>
+                          </>
+                      ) : (
+                          <div className="flex flex-col items-center justify-center w-32 h-24 text-gray-400 text-xs">
+                              <QrCode size={24} className="mb-1"/>
+                              Gerando Link...
+                          </div>
+                      )}
+                  </div>
+              </div>
+          </div>
+      );
+  };
+
   return (
     <div className="space-y-6">
-      {/* ... existing header and summary cards ... */}
+      {/* ... (Existing render code for dashboard cards, filters, and list) ... */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 no-print">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Painel de Ordens de Produção</h1>
@@ -634,7 +718,7 @@ export const ProductionOrderList: React.FC = () => {
                     </div>
                  </div>
                  <div className="flex gap-2">
-                     <button onClick={() => window.print()} className="p-2 hover:bg-slate-700 rounded text-slate-300"><Printer/></button>
+                     <button onClick={() => setIsLabelModalOpen(true)} className="p-2 hover:bg-slate-700 rounded text-slate-300" title="Imprimir Ordem/QR"><Printer/></button>
                      <button onClick={() => setSelectedOp(null)} className="p-2 hover:bg-red-900/50 rounded text-red-400"><X/></button>
                  </div>
               </div>
@@ -696,7 +780,7 @@ export const ProductionOrderList: React.FC = () => {
                             <div className="flex justify-between mb-4 items-center">
                                 <h4 className="font-bold text-sm text-gray-700">Grade de Produção Consolidada (Real)</h4>
                                 <button onClick={() => setIsLabelModalOpen(true)} className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded hover:bg-gray-200 flex items-center gap-1">
-                                    <Tag size={12}/> Etiquetas Lote
+                                    <Printer size={12}/> Imprimir Ficha & QR
                                 </button>
                             </div>
                             <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
@@ -822,39 +906,15 @@ export const ProductionOrderList: React.FC = () => {
         </div>
       )}
 
-      {/* LABEL PRINTING MODAL */}
+      {/* LABEL & QR PRINTING MODAL (UPDATED) */}
       {selectedOp && isLabelModalOpen && (
-          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4">
-              <div className="bg-white rounded-lg w-full max-w-2xl h-[80vh] flex flex-col">
-                  <div className="p-4 border-b flex justify-between items-center bg-gray-50 no-print">
-                      <h3 className="font-bold">Etiquetas de Lote</h3>
-                      <div className="flex gap-2">
-                        <button onClick={() => window.print()} className="bg-blue-600 text-white px-3 py-1 rounded">Imprimir</button>
-                        <button onClick={() => setIsLabelModalOpen(false)} className="bg-gray-200 px-3 py-1 rounded">Fechar</button>
-                      </div>
+          <div className="fixed inset-0 bg-gray-500/90 z-[60] flex justify-center overflow-y-auto">
+              <div className="relative my-8">
+                  <div className="absolute -top-10 right-0 flex gap-2 no-print">
+                      <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2"><Printer size={18}/> Imprimir</button>
+                      <button onClick={() => setIsLabelModalOpen(false)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded shadow font-bold hover:bg-gray-300 flex items-center gap-2"><X size={18}/> Fechar</button>
                   </div>
-                  <div className="flex-1 overflow-y-auto p-8 printable-sheet">
-                      <div className="grid grid-cols-2 gap-4">
-                          {[1,2,3,4].map(n => (
-                              <div key={n} className="border-2 border-black p-4 flex flex-col justify-between h-48 break-inside-avoid">
-                                  <div className="flex justify-between items-start">
-                                      <div>
-                                        <h2 className="font-bold text-xl">{selectedOp.lotNumber}</h2>
-                                        <p className="text-sm font-mono">{selectedOp.productId}</p>
-                                      </div>
-                                      <div className="w-12 h-12 bg-black"></div> 
-                                  </div>
-                                  <div className="text-center font-bold text-2xl border-y py-2 my-2">
-                                      Tamanho: M
-                                  </div>
-                                  <div className="flex justify-between text-xs">
-                                      <span>Cor: Branco</span>
-                                      <span>Pct: {n}/10</span>
-                                  </div>
-                              </div>
-                          ))}
-                      </div>
-                  </div>
+                  {renderA4CuttingOrder()}
               </div>
           </div>
       )}

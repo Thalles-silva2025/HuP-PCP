@@ -4,7 +4,7 @@ import {
   StandardObservation, Color, SubcontractorOrder, FinishedProductStock, 
   WIPItem, ConsolidatedRequirement, OrderStatus, ProductStatus, 
   UnitOfMeasure, ReturnItem, MaterialType, CuttingJob, PaymentRecord, 
-  Warehouse, ProductionGoal, TechPack, BOMItem, Operation, MeasurementPoint
+  Warehouse, ProductionGoal, TechPack, BOMItem, Operation, MeasurementPoint, ProductionLink
 } from '../types';
 
 // --- CONFIGURAÇÃO DA SIMULAÇÃO ---
@@ -84,10 +84,10 @@ let materials: Material[] = [
     { id: 'MAT-08', code: 'BOJ-BOL', name: 'Bojo Bolha (Par)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 2000, costUnit: 2.50, supplier: 'Delfa', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-boj-${c.id}`, name: c.name, stock: 200 })) },
     { id: 'MAT-09', code: 'ARO-MET', name: 'Aro Metálico (Sutiã)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 5000, costUnit: 0.80, supplier: 'Metalsinos', status: 'Ativo' },
     { id: 'MAT-10', code: 'FEC-COS', name: 'Fecho Costas (Colchete)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 4000, costUnit: 0.50, supplier: 'Haco', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-fec-${c.id}`, name: c.name, stock: 400 })) },
-    { id: 'MAT-11', code: 'LAC-CET', name: 'Lacinho de Cetim (Enfeite)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 10000, costUnit: 0.10, supplier: 'Aviamentos SP', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-lac-${c.id}`, name: c.name, stock: 1000 })) },
-    { id: 'MAT-12', code: 'ETI-CMP', name: 'Etiqueta Composição', type: MaterialType.LABEL, unit: UnitOfMeasure.UNIT, currentStock: 20000, costUnit: 0.05, supplier: 'Haco', status: 'Ativo' },
-    { id: 'MAT-13', code: 'SAC-PP', name: 'Saco PP Adesivado', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 15000, costUnit: 0.15, supplier: 'Embalagens Ltda', status: 'Ativo' },
-    { id: 'MAT-14', code: 'CX-PAD', name: 'Caixa de Expedição Padrão', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 500, costUnit: 3.50, supplier: 'Klabin', status: 'Ativo' }
+    { id: 'MAT-11', code: 'LAC-001', name: 'Lacinho de Cetim (Enfeite)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 10000, costUnit: 0.10, supplier: 'Aviamentos SP', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-lac-${c.id}`, name: c.name, stock: 1000 })) },
+    { id: 'MAT-12', code: 'ETI-001', name: 'Etiqueta Composição', type: MaterialType.LABEL, unit: UnitOfMeasure.UNIT, currentStock: 20000, costUnit: 0.05, supplier: 'Haco', status: 'Ativo' },
+    { id: 'MAT-13', code: 'SAC-001', name: 'Saco PP Adesivado', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 15000, costUnit: 0.15, supplier: 'Embalagens Ltda', status: 'Ativo' },
+    { id: 'MAT-14', code: 'CX-001', name: 'Caixa de Expedição Padrão', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 500, costUnit: 3.50, supplier: 'Klabin', status: 'Ativo' }
 ];
 
 // --- 3. PRODUTOS & FICHAS TÉCNICAS (20 Itens) ---
@@ -172,6 +172,8 @@ let subcontractorOrders: SubcontractorOrder[] = [];
 let finishedStock: FinishedProductStock[] = [];
 let payments: PaymentRecord[] = [];
 let productionGoals: ProductionGoal[] = [];
+// Storage for QR Links
+let productionLinks: ProductionLink[] = [];
 
 // Gerar Metas
 for (let i=1; i<=12; i++) {
@@ -416,6 +418,39 @@ export const MockService = {
         return op;
     });
     return true;
+  },
+
+  // --- QR CODE GENERATION LOGIC ---
+  generateProductionLink: async (opId: string) => {
+      await delay(300);
+      const op = productionOrders.find(o => o.id === opId);
+      if (!op) throw new Error("OP não encontrada");
+
+      // Check if active link exists
+      const existing = productionLinks.find(l => l.opId === opId && l.active);
+      if (existing) return existing;
+
+      const now = new Date();
+      const expires = new Date();
+      expires.setDate(now.getDate() + 30); // 30 dias de validade
+
+      const newLink: ProductionLink = {
+          id: `lnk-${Date.now()}`,
+          opId,
+          token: Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10), // Token único
+          type: 'GENERAL',
+          createdAt: now.toISOString(),
+          expiresAt: expires.toISOString(),
+          active: true,
+          views: 0
+      };
+      
+      productionLinks.push(newLink);
+      
+      // Update OP to reference this link
+      productionOrders = productionOrders.map(o => o.id === opId ? { ...o, activeLink: newLink } : o);
+      
+      return newLink;
   },
 
   // ... (Other OP methods) ...

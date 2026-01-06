@@ -54,6 +54,18 @@ export interface UserProfile {
   onboarding_completed?: boolean;
 }
 
+// QR Code & External Access Link
+export interface ProductionLink {
+    id: string;
+    opId: string;
+    token: string; // O código secreto da URL
+    type: 'CUTTING' | 'SEWING' | 'GENERAL';
+    createdAt: string;
+    expiresAt: string; // Validade de 30 dias
+    active: boolean;
+    views: number;
+}
+
 // Master Data Interfaces
 export interface Partner {
   id: string;
@@ -466,6 +478,9 @@ export interface ProductionOrder {
   createdAt: string;
   costSnapshot: number;
   
+  // Active Link for QR Code
+  activeLink?: ProductionLink;
+
   // Stages
   cuttingDetails?: CuttingDetails;
   subcontractorDetails?: SubcontractorDetails;

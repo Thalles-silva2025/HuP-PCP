@@ -393,9 +393,9 @@ export const PaymentsModule: React.FC = () => {
                           <tr key={item.id} className={`hover:bg-gray-50 transition-colors ${item.isOverdue ? 'bg-red-50/30' : ''}`}>
                               <td className="p-4">
                                   {isPaid ? (
-                                      <CheckCircle2 size={18} className="text-green-500" title="Pago"/>
+                                      <div title="Pago"><CheckCircle2 size={18} className="text-green-500"/></div>
                                   ) : item.isOverdue ? (
-                                      <AlertCircle size={18} className="text-red-500" title={`Vencido há ${item.daysOverdue} dias`}/>
+                                      <div title={`Vencido há ${item.daysOverdue} dias`}><AlertCircle size={18} className="text-red-500"/></div>
                                   ) : (
                                       <div className="w-4 h-4 rounded-full border-2 border-gray-300" title="Aberto"></div>
                                   )}
