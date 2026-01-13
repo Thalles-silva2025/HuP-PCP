@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area 
@@ -6,9 +7,11 @@ import {
   AlertCircle, Clock, CheckCircle2, Factory, TrendingUp, DollarSign, 
   ShoppingBag, AlertTriangle, ArrowRight, ChevronDown, PackageX, Calendar, Filter, Target, PackageCheck, Flame
 } from 'lucide-react';
-import { MockService } from '../services/mockDb';
+import { ApiService } from '../services/api';
 import { ProductionOrder, OrderStatus, Material, PaymentRecord, Product, ProductionGoal } from '../types';
 import { useNavigate } from 'react-router-dom';
+
+// ... (Resto do arquivo, apenas alterando as chamadas MockService.* para ApiService.*)
 
 // --- TYPES ---
 type DashboardView = 'overview' | 'delayed' | 'efficiency' | 'wip';
@@ -76,24 +79,27 @@ export const Dashboard: React.FC = () => {
 
   const loadData = async () => {
     setLoading(true);
-    const [ops, mats, pay, prods, prodGoals] = await Promise.all([
-      MockService.getProductionOrders(),
-      MockService.getMaterials(),
-      MockService.getPayments(),
-      MockService.getProducts(),
-      MockService.getProductionGoals()
-    ]);
+    try {
+        const [ops, mats, pay, prods, prodGoals] = await Promise.all([
+          ApiService.getProductionOrders(),
+          ApiService.getMaterials(),
+          ApiService.getPayments(),
+          ApiService.getProducts(),
+          ApiService.getProductionGoals()
+        ]);
 
-    setAllOps(ops);
-    setMaterials(mats);
-    setPayments(pay);
-    setProducts(prods);
-    setGoals(prodGoals);
-    
-    // Calculate Goals immediately after load
-    calculateGoalStats(ops, prodGoals);
-    
-    setLoading(false);
+        setAllOps(ops);
+        setMaterials(mats);
+        setPayments(pay);
+        setProducts(prods);
+        setGoals(prodGoals);
+        
+        calculateGoalStats(ops, prodGoals);
+    } catch (error) {
+        console.error("Erro ao carregar dashboard:", error);
+    } finally {
+        setLoading(false);
+    }
   };
 
   const calculateGoalStats = (ops: ProductionOrder[], goals: ProductionGoal[]) => {
@@ -133,12 +139,14 @@ export const Dashboard: React.FC = () => {
       });
   };
 
+  // ... (Resto do arquivo mantém a mesma lógica, pois os dados agora vêm do ApiService)
+  // ... (Mantenha o restante do código igual, apenas substitua MockService por ApiService se houver outras chamadas)
+
   const handleRangeChange = (days: number | 'custom') => {
       const end = new Date();
       let start = new Date();
       
       if (days === 'custom') {
-          // Keep current dates but change mode, handled by inputs
           setDateRange({ ...dateRange, label: 'Custom', days: 'custom' });
           return;
       } else {
@@ -154,11 +162,9 @@ export const Dashboard: React.FC = () => {
   };
 
   const filterDataAndCalc = () => {
-      // 1. Filter OPs based on Range (Created At)
       const rangeStart = dateRange.start.getTime();
       const rangeEnd = dateRange.end.getTime();
 
-      // For charts involving history (Efficiency, Lead Time), use filtered list
       const relevantHistoryOps = allOps.filter(op => {
           const d = new Date(op.createdAt).getTime();
           return d >= rangeStart && d <= rangeEnd;
@@ -178,18 +184,15 @@ export const Dashboard: React.FC = () => {
       const today = new Date();
       today.setHours(0,0,0,0);
 
-      // 1. Active & Delayed (Uses ALL open OPs, regardless of date filter, to be accurate for "Today")
       const activeOps = allOps.filter(o => o.status !== OrderStatus.COMPLETED && o.status !== OrderStatus.CANCELLED && o.status !== OrderStatus.DRAFT);
       
       const delayed = activeOps.filter(o => {
-          // Delayed Logic: Due Date < Today
           const due = new Date(o.dueDate);
           return due < today;
       });
 
       const delayedPcs = delayed.reduce((a,b) => a + b.quantityTotal, 0);
 
-      // 2. Lead Time & Efficiency (Uses HISTORY OPs filtered by date range)
       const completedInPeriod = historyOps.filter(o => o.status === OrderStatus.COMPLETED);
       let totalDays = 0;
       completedInPeriod.forEach(o => {
@@ -199,8 +202,6 @@ export const Dashboard: React.FC = () => {
       });
       const avgLead = completedInPeriod.length ? totalDays / completedInPeriod.length : 0;
 
-      // Efficiency (Quality) - Based on Revision
-      // Filter OPs that have revision data
       let totalQuality = 0;
       let countQuality = 0;
       historyOps.forEach(o => {
@@ -227,7 +228,6 @@ export const Dashboard: React.FC = () => {
           }, 0)
       });
 
-      // 2. Urgent Materials
       const criticalMats: {material: Material, missing: number}[] = [];
       mats.forEach(m => {
           if (m.currentStock < 100) { 
@@ -236,7 +236,6 @@ export const Dashboard: React.FC = () => {
       });
       setUrgentMaterials(criticalMats.slice(0, 5));
 
-      // 3. Payments Due Today or Overdue
       const due = pay.filter(p => {
           const d = new Date(p.date);
           d.setHours(0,0,0,0);
@@ -244,7 +243,6 @@ export const Dashboard: React.FC = () => {
       });
       setTodaysPayments(due);
 
-      // 4. Finishing Priority (Sales Type)
       const finishingOps = allOps.filter(o => o.status === OrderStatus.QUALITY_CONTROL || o.status === OrderStatus.PACKING);
       const groups: Record<string, number> = { 'Hype': 0, 'Vende Tudo': 0, 'Vende Bem': 0, 'Normal': 0 };
       
@@ -256,14 +254,12 @@ export const Dashboard: React.FC = () => {
       });
 
       setFinishingPriority([
-          { name: 'Hype', value: groups['Hype'], color: '#9333ea' }, // Purple
-          { name: 'Vende Tudo', value: groups['Vende Tudo'], color: '#f97316' }, // Orange
-          { name: 'Vende Bem', value: groups['Vende Bem'], color: '#3b82f6' }, // Blue
-          { name: 'Normal', value: groups['Normal'], color: '#94a3b8' } // Gray
+          { name: 'Hype', value: groups['Hype'], color: '#9333ea' },
+          { name: 'Vende Tudo', value: groups['Vende Tudo'], color: '#f97316' },
+          { name: 'Vende Bem', value: groups['Vende Bem'], color: '#3b82f6' },
+          { name: 'Normal', value: groups['Normal'], color: '#94a3b8' }
       ].filter(g => g.value > 0));
   };
-
-  // --- CHART DATA GENERATORS ---
 
   const getWipData = () => {
       const stages = {
@@ -293,19 +289,14 @@ export const Dashboard: React.FC = () => {
         .slice(0, 10);
   };
 
-  // FIX: Chart data for quality now properly handles safe access
   const getQualityChartData = () => {
-      // Get OPs with actual revision details in the filtered period
       const relevant = filteredOps.filter(o => o.revisionDetails && (o.revisionDetails.approvedQty > 0 || o.revisionDetails.rejectedQty > 0));
-      
       return relevant.slice(-15).map(o => ({
           name: o.lotNumber,
           aprovado: o.revisionDetails?.approvedQty || 0,
           defeito: (o.revisionDetails?.reworkQty || 0) + (o.revisionDetails?.rejectedQty || 0)
       }));
   };
-
-  // --- RENDER HELPERS ---
 
   const StatCard = ({ title, value, sub, icon: Icon, color, activeKey, onClick }: any) => (
     <div 
@@ -343,7 +334,6 @@ export const Dashboard: React.FC = () => {
 
   return (
     <div className="space-y-8 pb-20 animate-fade-in">
-      {/* HEADER & FILTER BAR */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between">
             <div>
@@ -355,7 +345,6 @@ export const Dashboard: React.FC = () => {
             </div>
         </div>
 
-        {/* DATE RANGE FILTER */}
         <div className="bg-white p-2 rounded-xl border shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2 px-2">
                 <Filter size={18} className="text-gray-400"/>
@@ -393,50 +382,15 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* KPI CARDS (INTERACTIVE) */}
+      {/* KPI CARDS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard 
-          title="Produção Ativa" 
-          value={stats.openOps} 
-          sub={`R$ ${(stats.totalRevenuePotential/1000).toFixed(1)}k em potencial`} 
-          icon={Factory} 
-          color="blue" 
-          activeKey="overview"
-          onClick={setActiveView}
-        />
-        <StatCard 
-          title="Peças em Atraso" 
-          value={stats.delayedPieces} 
-          sub={`Crítico: ${stats.delayedOps} OPs`} 
-          icon={AlertCircle} 
-          color="red" 
-          activeKey="delayed"
-          onClick={setActiveView}
-        />
-        <StatCard 
-          title="Lead Time Médio" 
-          value={`${stats.avgLeadTime} Dias`} 
-          sub="Meta: 12 Dias" 
-          icon={Clock} 
-          color="orange" 
-          activeKey="overview" 
-          onClick={setActiveView}
-        />
-        <StatCard 
-          title="Qualidade Facção" 
-          value={`${stats.efficiencyRate}%`} 
-          sub="Aprovado 1ª" 
-          icon={CheckCircle2} 
-          color="green" 
-          activeKey="efficiency"
-          onClick={setActiveView}
-        />
+        <StatCard title="Produção Ativa" value={stats.openOps} sub={`R$ ${(stats.totalRevenuePotential/1000).toFixed(1)}k em potencial`} icon={Factory} color="blue" activeKey="overview" onClick={setActiveView} />
+        <StatCard title="Peças em Atraso" value={stats.delayedPieces} sub={`Crítico: ${stats.delayedOps} OPs`} icon={AlertCircle} color="red" activeKey="delayed" onClick={setActiveView} />
+        <StatCard title="Lead Time Médio" value={`${stats.avgLeadTime} Dias`} sub="Meta: 12 Dias" icon={Clock} color="orange" activeKey="overview" onClick={setActiveView} />
+        <StatCard title="Qualidade Facção" value={`${stats.efficiencyRate}%`} sub="Aprovado 1ª" icon={CheckCircle2} color="green" activeKey="efficiency" onClick={setActiveView} />
       </div>
 
-      {/* EXPANDED DETAILS SECTION (DRILL DOWN) */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden transition-all duration-500">
-          
-          {/* VIEW: OVERVIEW / WIP */}
           {activeView === 'overview' && (
               <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-8">
                   <div className="lg:col-span-2">
@@ -457,8 +411,6 @@ export const Dashboard: React.FC = () => {
                           </ResponsiveContainer>
                       </div>
                   </div>
-                  
-                  {/* METAS CARD - CONNECTED TO REAL DATA */}
                   <div 
                     onClick={() => navigate('/goals')}
                     className="bg-blue-50 rounded-xl p-6 border border-blue-100 flex flex-col justify-center items-center text-center cursor-pointer hover:shadow-md hover:bg-blue-100 transition-all group relative overflow-hidden"
@@ -475,20 +427,15 @@ export const Dashboard: React.FC = () => {
                           <span>Real: <b>{goalStats.realized}</b></span>
                           <span>Meta: <b>{goalStats.target}</b></span>
                       </p>
-                      
-                      {/* Progress Bar Background */}
                       <div className="absolute bottom-0 left-0 h-2 bg-blue-200 w-full">
                           <div className="h-full bg-blue-600 transition-all duration-1000" style={{width: `${Math.min(100, goalStats.percent)}%`}}></div>
                       </div>
-
                       <span className="mt-6 text-xs font-bold bg-blue-600 text-white px-4 py-2 rounded-lg group-hover:bg-blue-700 transition-colors flex items-center gap-1 relative z-10">
                           Gerenciar Metas <ArrowRight size={12}/>
                       </span>
                   </div>
               </div>
           )}
-
-          {/* VIEW: DELAYED OPS */}
           {activeView === 'delayed' && (
               <div className="p-6 bg-red-50/50">
                   <div className="flex justify-between items-center mb-6">
@@ -513,12 +460,7 @@ export const Dashboard: React.FC = () => {
                       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
                           <table className="w-full text-sm text-left">
                               <thead className="bg-red-100 text-red-800 font-bold">
-                                  <tr>
-                                      <th className="p-3">OP</th>
-                                      <th className="p-3">Entrega</th>
-                                      <th className="p-3 text-right">Atraso</th>
-                                      <th className="p-3 text-right">Qtd</th>
-                                  </tr>
+                                  <tr><th className="p-3">OP</th><th className="p-3">Entrega</th><th className="p-3 text-right">Atraso</th><th className="p-3 text-right">Qtd</th></tr>
                               </thead>
                               <tbody className="divide-y divide-red-100">
                                   {allOps.filter(o => new Date(o.dueDate) < new Date() && o.status !== OrderStatus.COMPLETED && o.status !== OrderStatus.CANCELLED).slice(0, 5).map(op => {
@@ -538,8 +480,6 @@ export const Dashboard: React.FC = () => {
                   </div>
               </div>
           )}
-
-          {/* VIEW: EFFICIENCY */}
           {activeView === 'efficiency' && (
               <div className="p-6 bg-green-50/50">
                   <h3 className="font-bold text-green-800 mb-6 flex items-center gap-2"><CheckCircle2 className="text-green-600"/> Qualidade Recente</h3>
@@ -567,10 +507,7 @@ export const Dashboard: React.FC = () => {
           )}
       </div>
 
-      {/* --- DECISION SUPPORT SECTION --- */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          
-          {/* 1. NEW: FINISHING PRIORITY (Sales Type) */}
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
               <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex justify-between items-center">
                   <h3 className="font-bold text-indigo-900 flex items-center gap-2"><Flame size={18} className="text-purple-600"/> Prioridade de Entrega</h3>
@@ -604,7 +541,6 @@ export const Dashboard: React.FC = () => {
               </div>
           </div>
 
-          {/* 2. URGENT PURCHASES */}
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
               <div className="p-4 bg-orange-50 border-b border-orange-100 flex justify-between items-center">
                   <h3 className="font-bold text-orange-900 flex items-center gap-2"><ShoppingBag size={18}/> Compras Urgentes</h3>
@@ -625,9 +561,7 @@ export const Dashboard: React.FC = () => {
                                           <div className="font-bold text-gray-900">{item.missing} {item.material.unit}</div>
                                       </td>
                                       <td className="p-4 w-10">
-                                          <button className="text-blue-600 hover:bg-blue-50 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" title="Ver Detalhes">
-                                              <ArrowRight size={16}/>
-                                          </button>
+                                          <button className="text-blue-600 hover:bg-blue-50 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" title="Ver Detalhes"><ArrowRight size={16}/></button>
                                       </td>
                                   </tr>
                               ))}
@@ -645,7 +579,6 @@ export const Dashboard: React.FC = () => {
               </div>
           </div>
 
-          {/* 3. QUICK ACTIONS / SHORTCUTS */}
           <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl shadow-lg text-white p-6 flex flex-col justify-between">
               <div>
                   <h3 className="font-bold text-lg mb-1 flex items-center gap-2"><Factory className="text-blue-400"/> Ações Rápidas</h3>
@@ -694,7 +627,6 @@ export const Dashboard: React.FC = () => {
                   </div>
               </div>
           </div>
-
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { Material, Product, FinishedProductStock, WIPItem, ProductStatus, MaterialType, UnitOfMeasure, ImportPreviewItem, ProductionOrder } from '../types';
-import { MockService } from '../services/mockDb';
+import { ApiService } from '../services/api';
 import { 
   Package, Search, Plus, Download, Factory, 
   Layers, CheckCircle2, AlertTriangle, XCircle, History, MoreVertical, Lock, ClipboardList, RotateCcw, Truck, Scissors, FileText, ClipboardCheck, Calendar, Archive, FileOutput, Printer, X
@@ -39,47 +39,28 @@ export const InventoryModule: React.FC = () => {
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
 
   const loadData = async () => {
-    const [mats, prods, finished, wip] = await Promise.all([
-      MockService.getMaterials(),
-      MockService.getProducts(),
-      MockService.getFinishedGoods(),
-      MockService.getWIPInventory()
-    ]);
-    setMaterials(mats);
-    setProducts(prods);
-    setFinishedStock(finished);
-    setWipItems(wip);
+    try {
+        const [mats, prods, finished, wip] = await Promise.all([
+          ApiService.getMaterials(),
+          ApiService.getProducts(),
+          ApiService.getFinishedGoods(),
+          ApiService.getWIPInventory()
+        ]);
+        setMaterials(mats);
+        setProducts(prods);
+        setFinishedStock(finished);
+        setWipItems(wip);
+    } catch (e) {
+        console.error("Erro ao carregar estoque:", e);
+    }
   };
 
   useEffect(() => {
     loadData();
   }, []);
 
-  // --- Search Logic for Finished Stock ---
-  const filteredStock = finishedStock.filter(item => {
-      const prod = products.find(p => p.id === item.productId);
-      const term = searchTerm.toLowerCase();
-      return (
-          prod?.sku.toLowerCase().includes(term) ||
-          prod?.name.toLowerCase().includes(term) ||
-          item.warehouse.toLowerCase().includes(term) ||
-          item.opId?.toLowerCase().includes(term)
-      );
-  });
-
-  // --- KPI Stats ---
-  const stats = useMemo(() => {
-      const totalItems = finishedStock.length;
-      const available = finishedStock.filter(s => s.status === 'Disponível').length;
-      const exported = finishedStock.filter(s => s.status === 'Exportado').length;
-      const totalValue = finishedStock.reduce((acc, s) => acc + (s.price || 0), 0);
-      return { totalItems, available, exported, totalValue };
-  }, [finishedStock]);
-
-  // --- Actions ---
-
   const handleOpClick = async (opId: string) => {
-    const op = await MockService.getProductionOrderById(opId);
+    const op = await ApiService.getProductionOrderById(opId);
     if (op) {
         setSelectedOpDetail(op);
         setActiveMenuId(null);
@@ -88,7 +69,7 @@ export const InventoryModule: React.FC = () => {
 
   const handleTraceability = async (opId?: string) => {
       if (!opId) return;
-      const op = await MockService.getProductionOrderById(opId);
+      const op = await ApiService.getProductionOrderById(opId);
       if (op) setSelectedStockOp(op);
       setActiveMenuId(null);
   };
@@ -96,7 +77,7 @@ export const InventoryModule: React.FC = () => {
   const handleRevertToPacking = async (id: string) => {
       if (!confirm('Tem certeza? Isso removerá o item do estoque e retornará a OP para o status de Embalagem.')) return;
       try {
-          await MockService.revertStockToPacking(id);
+          await ApiService.revertStockToPacking(id);
           loadData();
           setActiveMenuId(null);
           alert('Item estornado e OP retornada para Embalagem.');
@@ -107,13 +88,33 @@ export const InventoryModule: React.FC = () => {
 
   const handleMarkExported = async () => {
       if (selectedStockIds.length === 0) return;
-      await MockService.markStockAsExported(selectedStockIds);
+      await ApiService.markStockAsExported(selectedStockIds);
       loadData();
       setSelectedStockIds([]);
       setIsReportModalOpen(false); // Close report modal
       setActiveMenuId(null);
       alert('Itens marcados como Exportado.');
   };
+
+  // --- Search Logic for Finished Stock ---
+  const filteredStock = finishedStock.filter(item => {
+      const prod = products.find(p => p.id === item.productId);
+      const term = searchTerm.toLowerCase();
+      return (
+          prod?.sku.toLowerCase().includes(term) ||
+          prod?.name.toLowerCase().includes(term) ||
+          item.warehouse.toLowerCase().includes(term) ||
+          (item.opLotNumber || item.opId || '').toLowerCase().includes(term)
+      );
+  });
+
+  const stats = useMemo(() => {
+      const totalItems = finishedStock.length;
+      const available = finishedStock.filter(s => s.status === 'Disponível').length;
+      const exported = finishedStock.filter(s => s.status === 'Exportado').length;
+      const totalValue = finishedStock.reduce((acc, s) => acc + (s.price || 0), 0);
+      return { totalItems, available, exported, totalValue };
+  }, [finishedStock]);
 
   const handleOpenExportReport = () => {
       if (selectedStockIds.length === 0) {
@@ -138,8 +139,6 @@ export const InventoryModule: React.FC = () => {
       if (lower.includes('estoque') || lower.includes('entrada')) return <Package size={16}/>;
       return <FileText size={16}/>;
   };
-
-  // --- Render Helpers ---
 
   const renderFinishedGoods = () => {
     return (
@@ -214,8 +213,8 @@ export const InventoryModule: React.FC = () => {
                      <span className="text-gray-400 mx-1">|</span>
                      <span>{stock.color}</span>
                   </td>
-                  <td className="p-3 font-mono text-xs">
-                     {stock.opId}
+                  <td className="p-3 font-mono text-xs font-bold text-gray-700">
+                     {stock.opLotNumber || stock.opId}
                   </td>
                   <td className="p-3">{stock.warehouse}</td>
                   <td className="p-3 text-right font-bold">{stock.quantity}</td>
@@ -238,7 +237,6 @@ export const InventoryModule: React.FC = () => {
                           <MoreVertical size={16}/>
                       </button>
                       
-                      {/* Context Menu - Correctly Positioned */}
                       {activeMenuId === stock.id && (
                           <div className="absolute right-10 top-2 bg-white shadow-2xl border border-gray-200 rounded-lg z-50 w-52 overflow-hidden animate-fade-in text-left">
                               <div className="py-1">
@@ -249,7 +247,6 @@ export const InventoryModule: React.FC = () => {
                                       <ClipboardList size={16}/> Visualizar OP
                                   </button>
                                   
-                                  {/* Logic: Destructive actions only if NOT exported */}
                                   {!isExported && (
                                     <>
                                         <div className="border-t my-1"></div>
@@ -348,7 +345,6 @@ export const InventoryModule: React.FC = () => {
           <p className="text-gray-500 text-sm">Controle de matéria-prima, WIP e produtos acabados.</p>
         </div>
         <div className="flex gap-2">
-          {/* Import Logic Hidden for brevity, same as before */}
           <button 
             onClick={() => {
                if(activeTab === 'raw') { setEditingMaterial({ type: MaterialType.FABRIC, unit: UnitOfMeasure.KG }); setIsMaterialModalOpen(true); }
@@ -414,7 +410,7 @@ export const InventoryModule: React.FC = () => {
 
       {/* --- MODALS --- */}
 
-      {/* 1. VIEW OP DETAIL MODAL (FIXED) */}
+      {/* 1. VIEW OP DETAIL MODAL */}
       {selectedOpDetail && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg animate-scale-in overflow-hidden">
@@ -441,10 +437,15 @@ export const InventoryModule: React.FC = () => {
                         <div className="text-gray-500 text-xs font-bold uppercase mb-1">Histórico Recente</div>
                         <div className="space-y-2 max-h-40 overflow-y-auto border rounded p-2 text-xs">
                             {selectedOpDetail.events?.map((ev, i) => (
-                                <div key={i} className="flex gap-2">
-                                    <span className="text-gray-400">{new Date(ev.date).toLocaleDateString()}</span>
-                                    <span className="font-bold">{ev.action}</span>
-                                    <span className="text-gray-600 truncate">{ev.description}</span>
+                                <div key={i} className="flex flex-col border-b last:border-0 pb-1 mb-1">
+                                    <div className="flex justify-between text-gray-400 mb-0.5">
+                                        <span>{new Date(ev.date).toLocaleString()}</span>
+                                        <span className="font-bold text-gray-600">{ev.user}</span>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <span className="font-bold">{ev.action}:</span>
+                                        <span className="text-gray-600 truncate">{ev.description}</span>
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -516,7 +517,7 @@ export const InventoryModule: React.FC = () => {
                                           <td className="border p-2 text-center font-bold">{item.size}</td>
                                           <td className="border p-2 text-center">{item.color}</td>
                                           <td className="border p-2 text-center font-bold">{item.quantity}</td>
-                                          <td className="border p-2 text-right font-mono text-gray-500">{item.opId}</td>
+                                          <td className="border p-2 text-right font-mono text-gray-500">{item.opLotNumber || item.opId}</td>
                                       </tr>
                                   )
                               })}

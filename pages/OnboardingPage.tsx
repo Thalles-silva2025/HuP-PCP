@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../services/supabase';
 import { useNavigate } from 'react-router-dom';
-import { Building2, DollarSign, Users, Target, AlertTriangle, TrendingDown, CheckCircle, ArrowRight, Activity, Save } from 'lucide-react';
+import { Building2, Target, CheckCircle, ArrowRight, Save } from 'lucide-react';
 
 export const OnboardingPage: React.FC = () => {
   const { user, refreshProfile } = useAuth();
@@ -19,7 +19,7 @@ export const OnboardingPage: React.FC = () => {
     market_years: '',
     production_model: '',
     main_pain_point: '',
-    is_profitable: '', // 'Sim' | 'Não' | 'Não Sei'
+    is_profitable: '', 
     loss_areas: '',
     current_system: ''
   });
@@ -35,17 +35,10 @@ export const OnboardingPage: React.FC = () => {
         return;
     }
 
-    // Explicit Validation with User Friendly Messages
     const requiredFields: Record<string, string> = {
         'company_name': 'Nome da Empresa',
         'phone': 'Telefone / WhatsApp',
-        'revenue_range': 'Faixa de Faturamento',
-        'employees_count': 'Nº de Funcionários',
-        'market_years': 'Tempo de Mercado',
-        'production_model': 'Modelo de Produção',
-        'main_pain_point': 'Principal Dor/Problema',
-        'is_profitable': 'Status de Lucratividade',
-        'loss_areas': 'Áreas de Perda'
+        'production_model': 'Modelo de Produção'
     };
 
     const missing = Object.keys(requiredFields).filter(key => {
@@ -54,8 +47,7 @@ export const OnboardingPage: React.FC = () => {
     });
     
     if (missing.length > 0) {
-        const missingList = missing.map(k => requiredFields[k]).join(', ');
-        alert(`Por favor, preencha os seguintes campos obrigatórios: \n\n${missingList}`);
+        alert(`Por favor, preencha os campos obrigatórios.`);
         return;
     }
 
@@ -64,44 +56,30 @@ export const OnboardingPage: React.FC = () => {
     try {
         const updates = {
             id: user.id,
-            // email: user.email, // REMOVIDO: O e-mail fica na tabela auth.users e não deve ser duplicado se a coluna não existir.
             ...formData,
-            is_profitable: formData.is_profitable === 'Sim', // Boolean conversion
+            is_profitable: formData.is_profitable === 'Sim',
             onboarding_completed: true,
             updated_at: new Date().toISOString()
         };
 
-        // Debug log
-        console.log('Tentando salvar dados no Supabase:', updates);
+        const { error } = await supabase.from('user_profiles').upsert(updates);
 
-        const { data, error } = await supabase.from('user_profiles').upsert(updates).select();
+        if (error) throw error;
 
-        if (error) {
-            console.error('Erro detalhado do Supabase:', error);
-            // Lança o erro com a mensagem específica do banco
-            throw new Error(error.message || JSON.stringify(error));
-        }
-
-        console.log('Dados salvos com sucesso:', data);
-
-        // Force reload profile to update context before redirect
-        await refreshProfile(); 
+        // Atualiza o contexto global e aguarda
+        await refreshProfile();
         
-        // Success
-        navigate('/');
+        // Pequeno delay para garantir propagação do estado
+        setTimeout(() => {
+            // Força navegação para home
+            navigate('/', { replace: true });
+            // Recarrega a página se necessário para limpar caches antigos
+            // window.location.href = '/'; 
+        }, 500);
+
     } catch (err: any) {
-        console.error('Erro Capturado no Submit:', err);
-        
-        let errorMessage = 'Erro desconhecido.';
-        if (err instanceof Error) {
-            errorMessage = err.message;
-        } else if (typeof err === 'object') {
-            errorMessage = JSON.stringify(err, null, 2);
-        } else {
-            errorMessage = String(err);
-        }
-
-        alert(`Ocorreu um erro ao salvar os dados:\n\n${errorMessage}\n\nIMPORTANTE: Verifique se você rodou o script SQL atualizado (GUIDE_SUPABASE_SETUP.md) no Supabase para criar as colunas de onboarding.`);
+        console.error('Erro ao salvar:', err);
+        alert(`Erro ao salvar dados: ${err.message || 'Tente novamente.'}`);
     } finally {
         setLoading(false);
     }
@@ -165,7 +143,7 @@ export const OnboardingPage: React.FC = () => {
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-bold text-gray-700 mb-1">Tempo de Mercado <span className="text-red-500">*</span></label>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Tempo de Mercado</label>
                                 <select 
                                     className="w-full border-2 border-gray-200 rounded-lg p-3 bg-white focus:border-blue-500 outline-none"
                                     value={formData.market_years}
@@ -182,7 +160,7 @@ export const OnboardingPage: React.FC = () => {
 
                         <div className="grid grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-sm font-bold text-gray-700 mb-1">Equipe (Funcionários) <span className="text-red-500">*</span></label>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Equipe</label>
                                 <select 
                                     className="w-full border-2 border-gray-200 rounded-lg p-3 bg-white focus:border-blue-500 outline-none"
                                     value={formData.employees_count}
@@ -197,7 +175,7 @@ export const OnboardingPage: React.FC = () => {
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm font-bold text-gray-700 mb-1">Faturamento Mensal <span className="text-red-500">*</span></label>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Faturamento Mensal</label>
                                 <select 
                                     className="w-full border-2 border-gray-200 rounded-lg p-3 bg-white focus:border-blue-500 outline-none"
                                     value={formData.revenue_range}
@@ -217,7 +195,7 @@ export const OnboardingPage: React.FC = () => {
                             <label className="block text-sm font-bold text-gray-700 mb-1">Sistema de Gestão Atual</label>
                             <input 
                                 className="w-full border-2 border-gray-200 rounded-lg p-3 focus:border-blue-500 outline-none"
-                                placeholder="Onde você controla hoje? (Ex: Planilhas, Bling, Millenium, Caderno...)"
+                                placeholder="Ex: Planilhas, Bling, Caderno..."
                                 value={formData.current_system}
                                 onChange={e => handleChange('current_system', e.target.value)}
                             />
@@ -249,7 +227,7 @@ export const OnboardingPage: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-bold text-gray-700 mb-1">Sua empresa dá lucro hoje? <span className="text-red-500">*</span></label>
+                            <label className="block text-sm font-bold text-gray-700 mb-1">Sua empresa dá lucro hoje?</label>
                             <div className="grid grid-cols-3 gap-2">
                                 {['Sim', 'Não', 'Não Sei'].map(opt => (
                                     <button
@@ -265,20 +243,20 @@ export const OnboardingPage: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-bold text-gray-700 mb-1">Maior Dor / Problema Atual <span className="text-red-500">*</span></label>
+                            <label className="block text-sm font-bold text-gray-700 mb-1">Maior Dor / Problema Atual</label>
                             <textarea 
                                 className="w-full border-2 border-gray-200 rounded-lg p-3 focus:border-red-500 outline-none h-20 resize-none"
-                                placeholder="Ex: Perco o controle do que está na facção, não sei meu custo real..."
+                                placeholder="Ex: Perco o controle do que está na facção..."
                                 value={formData.main_pain_point}
                                 onChange={e => handleChange('main_pain_point', e.target.value)}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-bold text-gray-700 mb-1">Onde você acredita que está perdendo dinheiro? <span className="text-red-500">*</span></label>
+                            <label className="block text-sm font-bold text-gray-700 mb-1">Onde você acredita que está perdendo dinheiro?</label>
                             <input 
                                 className="w-full border-2 border-gray-200 rounded-lg p-3 focus:border-red-500 outline-none"
-                                placeholder="Ex: Compra errada de tecido, roubo, retrabalho..."
+                                placeholder="Ex: Compra errada de tecido, roubo..."
                                 value={formData.loss_areas}
                                 onChange={e => handleChange('loss_areas', e.target.value)}
                             />

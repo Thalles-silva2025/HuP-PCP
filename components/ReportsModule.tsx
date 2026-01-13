@@ -10,7 +10,7 @@ import {
   Activity, Package, Users, BarChart3, FileText, Download, Search, ClipboardList, Wallet, Clock, List, Printer, PieChart as PieChartIcon, ThumbsUp, ThumbsDown, Timer, HelpCircle
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { MockService } from '../services/mockDb';
+import { ApiService } from '../services/api';
 import { ProductionOrder, Product, Material, SubcontractorOrder, OrderStatus, MaterialType, PaymentRecord } from '../types';
 
 // --- TYPES ---
@@ -67,11 +67,11 @@ export const ReportsModule: React.FC = () => {
 
   const loadData = async () => {
     const [allOps, allProds, allMats, allOsfs, allPayments] = await Promise.all([
-      MockService.getProductionOrders(),
-      MockService.getProducts(),
-      MockService.getMaterials(),
-      MockService.getSubcontractorOrders(),
-      MockService.getPayments()
+      ApiService.getProductionOrders(),
+      ApiService.getProducts(),
+      ApiService.getMaterials(),
+      ApiService.getSubcontractorOrders(),
+      ApiService.getPayments()
     ]);
     setOps(allOps);
     setProducts(allProds);

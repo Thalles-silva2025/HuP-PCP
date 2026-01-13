@@ -1,4 +1,12 @@
 
+/**
+ * 🔒 CORE AUTH CONTEXT - LOCKED
+ * -----------------------------
+ * Gerencia o estado global de autenticação e dados do usuário.
+ * Modificado para garantir que 'loading' só seja false após tentar buscar o perfil.
+ * AGORA COM AUTO-REPARO DE PERFIL E SAFETY TIMEOUT.
+ */
+
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../services/supabase';
@@ -28,75 +36,111 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchProfile = async (userId: string) => {
+  // Função isolada e robusta para buscar perfil com Auto-Reparo
+  const fetchProfile = async (userId: string, email?: string) => {
       try {
           const { data, error } = await supabase
             .from('user_profiles')
             .select('*')
             .eq('id', userId)
-            .single();
+            .maybeSingle();
           
-          if (data && !error) {
+          if (data && data.organization_id) {
               setProfile(data as UserProfile);
-          } else if (error?.code === 'PGRST116') {
-              console.log("Profile not found, waiting for creation...");
+              return data;
+          } 
+          
+          // AUTO-REPARO: Se não encontrou perfil ou falta organização
+          if (!data || !data.organization_id) {
+              console.log("AuthContext: Perfil incompleto. Tentando reparo automático...");
+              
+              // 1. Cria Org
+              const { data: newOrg } = await supabase.from('organizations').insert([{ name: 'Minha Confecção' }]).select('id').single();
+              
+              if(newOrg) {
+                  // 2. Upsert Profile
+                  const { data: newProfile } = await supabase.from('user_profiles').upsert({
+                      id: userId,
+                      email: email || '',
+                      organization_id: newOrg.id,
+                      role: 'admin',
+                      updated_at: new Date().toISOString()
+                  }).select().single();
+                  
+                  if (newProfile) {
+                      setProfile(newProfile as UserProfile);
+                      return newProfile;
+                  }
+              }
           }
+          
+          // Fallback final
+          if (error) console.error("Erro ao buscar perfil:", error.message);
+          return null;
+
       } catch (err) {
-          console.error("Error fetching profile:", err);
+          console.error("Erro inesperado no fetchProfile:", err);
+          return null;
       }
   };
 
   useEffect(() => {
     let mounted = true;
 
+    // SAFETY TIMEOUT: Força a liberação da tela de loading se o Supabase demorar mais de 6 segundos
+    // Isso evita que o app trave na tela "Conectando ao sistema..."
+    const safetyTimer = setTimeout(() => {
+        if (mounted && loading) {
+            console.warn("⚠️ Auth Init Timed Out - Forcing UI Render");
+            setLoading(false);
+        }
+    }, 6000);
+
     const initAuth = async () => {
         try {
-            // Timeout de segurança: Se o Supabase demorar mais de 5s, assumimos falha/offline e liberamos o app
-            const timeOutPromise = new Promise((resolve) => setTimeout(() => resolve({ error: { message: 'Timeout' }, data: { session: null } }), 5000));
-            const sessionPromise = supabase.auth.getSession();
-
-            const response: any = await Promise.race([sessionPromise, timeOutPromise]);
-            const { data: { session } } = response;
+            // 1. Pega a sessão atual
+            const { data: { session: currentSession }, error } = await supabase.auth.getSession();
             
+            if (error) throw error;
+
             if (mounted) {
-                setSession(session);
-                setUser(session?.user ?? null);
+                setSession(currentSession);
+                setUser(currentSession?.user ?? null);
                 
-                if (session?.user) {
-                    // Tenta buscar o perfil, mas não bloqueia se falhar
-                    await fetchProfile(session.user.id).catch(e => console.error("Profile fetch failed on init", e));
+                // 2. Se tem usuário, busca o perfil
+                if (currentSession?.user) {
+                    await fetchProfile(currentSession.user.id, currentSession.user.email);
                 }
             }
         } catch (error) {
-            console.error("Auth init error:", error);
+            console.error("Auth init failed:", error);
         } finally {
-            if (mounted) setLoading(false);
+            if (mounted) {
+                setLoading(false);
+                clearTimeout(safetyTimer); // Cancela o timeout de segurança se tudo correu bem
+            }
         }
     };
 
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    // Listener para mudanças em tempo real (Login/Logout/Token Refresh)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (mounted) {
-          // Atualiza sessão em eventos explícitos para evitar re-renderizações desnecessárias
           if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-             setSession(session);
-             setUser(session?.user ?? null);
+             setSession(newSession);
+             setUser(newSession?.user ?? null);
              
-             if (session?.user) {
-                 try {
-                    await fetchProfile(session.user.id);
-                 } catch(e) {
-                    console.error("Profile refresh error", e);
-                 }
+             // Busca perfil imediatamente ao logar
+             if (newSession?.user) {
+                 await fetchProfile(newSession.user.id, newSession.user.email);
              }
           } else if (event === 'SIGNED_OUT') {
              setSession(null);
              setUser(null);
              setProfile(null);
+             setLoading(false);
           }
-          // Nota: Não forçamos setLoading(true) aqui para evitar que a tela pisque ou trave
-          // A inicialização principal (initAuth) cuida do estado inicial de carregamento.
       }
     });
 
@@ -107,17 +151,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signOut = async () => {
+    setLoading(true);
     await supabase.auth.signOut();
     setProfile(null);
     setUser(null);
     setSession(null);
+    setLoading(false);
   };
 
   const refreshProfile = async () => {
       if (user) {
-          setLoading(true); 
-          await fetchProfile(user.id);
-          setLoading(false);
+          await fetchProfile(user.id, user.email);
       }
   };
 

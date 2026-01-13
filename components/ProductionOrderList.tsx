@@ -3,10 +3,11 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
 import { MockService } from '../services/mockDb';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, QrCode } from 'lucide-react';
+import { ApiService } from '../services/api';
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
-// ... existing helper functions (getColorStyle, StatusBadge, SizeColorMatrix) ...
+// ... existing helper functions ...
 // Helper for Color
 const getColorStyle = (colorName: string) => {
     const map: any = {
@@ -66,8 +67,8 @@ const SizeColorMatrix = ({ items, sizes }: { items: any[], sizes: string[] }) =>
   };
 
   return (
-    <div className="border rounded-lg relative">
-      <div className="absolute top-2 right-2 no-print">
+    <div className="border rounded-lg relative bg-white">
+      <div className="absolute top-2 right-2">
           <button onClick={copyToClipboard} className="p-1 hover:bg-gray-200 rounded text-gray-500" title="Copiar Grade">
               <Copy size={16}/>
           </button>
@@ -115,6 +116,10 @@ export const ProductionOrderList: React.FC = () => {
 
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
+  
+  // NEW: State to hold children OPs when viewing a batch
+  const [batchChildren, setBatchChildren] = useState<ProductionOrder[]>([]);
+
   const [products, setProducts] = useState<Product[]>([]);
   
   // Tab State
@@ -140,39 +145,17 @@ export const ProductionOrderList: React.FC = () => {
   const [revisionForm, setRevisionForm] = useState<any>({});
   const [packingForm, setPackingForm] = useState<any>({});
 
-  // QR CODE GENERATION STATE
-  const [qrToken, setQrToken] = useState<string | null>(null);
-  const [qrExpiry, setQrExpiry] = useState<string | null>(null);
-
   useEffect(() => {
     loadData();
   }, []);
 
-  // NEW: Generate QR when label modal opens
-  useEffect(() => {
-      if (selectedOp && isLabelModalOpen) {
-          const fetchQr = async () => {
-              if (selectedOp.activeLink) {
-                  setQrToken(selectedOp.activeLink.token);
-                  setQrExpiry(selectedOp.activeLink.expiresAt);
-              } else {
-                  // Generate new
-                  const link = await MockService.generateProductionLink(selectedOp.id);
-                  setQrToken(link.token);
-                  setQrExpiry(link.expiresAt);
-              }
-          };
-          fetchQr();
-      }
-  }, [selectedOp, isLabelModalOpen]);
-
   const loadData = async () => {
     const [orders, prods] = await Promise.all([
-        MockService.getProductionOrders(),
-        MockService.getProducts()
+        ApiService.getProductionOrders(),
+        ApiService.getProducts()
     ]);
     
-    // Sort recent first
+    // Sort recent first (Force desc sort by createdAt)
     orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
     setOps(orders);
@@ -194,30 +177,33 @@ export const ProductionOrderList: React.FC = () => {
 
   const openDetails = (op: ProductionOrder) => {
     setSelectedOp(op);
+    setBatchChildren([]); // Clear batch children for single OP view
     setActiveTab('summary');
     setRevisionForm(op.revisionDetails || { approvedQty: 0, reworkQty: 0, rejectedQty: 0, inspectorName: '' });
     setPackingForm(op.packingDetails || { totalBoxes: 0, packingType: 'Caixa Padrão', totalPackedQty: 0 });
   };
 
-  // ... (Rest of existing logic: handleViewBatch, getActiveSizes, filteredOps, groupedOps, stats, actions) ...
+  // --- NEW: Handle Consolidated Batch View ---
   const handleViewBatch = (e: React.MouseEvent, groupOps: ProductionOrder[]) => {
       e.stopPropagation();
       if (groupOps.length === 0) return;
 
-      // Create a "Virtual" OP that aggregates all children
+      // Store individual OPs for the detailed view
+      setBatchChildren(groupOps);
+
+      // Create a "Virtual" OP that aggregates all children just for the Header Summary
       const totalQty = groupOps.reduce((acc, op) => acc + op.quantityTotal, 0);
-      const allItems = groupOps.flatMap(op => op.items);
+      const allItems = groupOps.flatMap(op => op.items); // Still flattening for TOTAL summary, but we will use children for details
       const allEvents = groupOps.flatMap(op => op.events).sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       
       const batchOp: ProductionOrder = {
           ...groupOps[0], // Copy basic info from first child
           id: `BATCH-${groupOps[0].lotNumber.split('-').slice(0, 2).join('-')}`,
           lotNumber: `${groupOps[0].lotNumber.split('-').slice(0, 2).join('-')} (Lote Completo)`,
-          productId: 'Múltiplos Modelos', // Or logic to show "Mixed"
+          productId: 'Múltiplos Modelos', 
           quantityTotal: totalQty,
           items: allItems,
           events: allEvents,
-          // Aggregate other details if needed, for now we keep it simple for the view
       };
 
       setSelectedOp(batchOp);
@@ -232,6 +218,7 @@ export const ProductionOrderList: React.FC = () => {
       return tp?.activeSizes || prod?.sizes || [];
   };
 
+  // ... (useMemo filters and stats - Keep Existing) ...
   const subcontractors = useMemo(() => {
       return Array.from(new Set(ops.map(o => o.subcontractor).filter(Boolean)));
   }, [ops]);
@@ -239,10 +226,14 @@ export const ProductionOrderList: React.FC = () => {
   const filteredOps = useMemo(() => {
       return ops.filter(op => {
           const prod = products.find(p => p.id === op.productId);
+          
+          // Search Text (Lot, SKU, Product Name)
           const searchMatch = !filters.search || 
               op.lotNumber.toLowerCase().includes(filters.search.toLowerCase()) ||
               prod?.name.toLowerCase().includes(filters.search.toLowerCase()) ||
               prod?.sku.toLowerCase().includes(filters.search.toLowerCase());
+
+          // Status Filter
           let statusMatch = true;
           if (filters.status === 'LATE') {
               const isLate = new Date(op.dueDate) < new Date() && op.status !== OrderStatus.COMPLETED && op.status !== OrderStatus.CANCELLED;
@@ -250,27 +241,36 @@ export const ProductionOrderList: React.FC = () => {
           } else {
               statusMatch = !filters.status || op.status === filters.status;
           }
+
+          // Subcontractor Filter
           const subMatch = !filters.subcontractor || op.subcontractor === filters.subcontractor;
+
+          // Date Range
           const opDate = new Date(op.startDate).setHours(0,0,0,0);
           const startFilter = filters.dateStart ? new Date(filters.dateStart).setHours(0,0,0,0) : null;
           const endFilter = filters.dateEnd ? new Date(filters.dateEnd).setHours(23,59,59,999) : null;
+
           const dateMatch = (!startFilter || opDate >= startFilter) &&
                             (!endFilter || opDate <= endFilter);
+
           return searchMatch && statusMatch && subMatch && dateMatch;
       });
   }, [ops, products, filters]);
 
   const groupedOps = useMemo<Record<string, ProductionOrder[]>>(() => {
       const groups: Record<string, ProductionOrder[]> = {};
+      
       filteredOps.forEach(op => {
           const parts = op.lotNumber.split('-');
           let baseLot = op.lotNumber;
           if (parts.length >= 3) {
               baseLot = `${parts[0]}-${parts[1]}`;
           }
+          
           if (!groups[baseLot]) groups[baseLot] = [];
           groups[baseLot].push(op);
       });
+      
       return groups;
   }, [filteredOps]);
 
@@ -292,6 +292,7 @@ export const ProductionOrderList: React.FC = () => {
       return counts;
   }, [ops]);
 
+  // ... (Actions like EditBatch, SaveRevision, SavePacking, RiskPlanning - Keep Existing) ...
   const handleEditBatch = (e: React.MouseEvent, groupOps: ProductionOrder[]) => {
       e.stopPropagation();
       const canEdit = groupOps.every(o => o.status === OrderStatus.DRAFT || o.status === OrderStatus.PLANNED);
@@ -313,7 +314,7 @@ export const ProductionOrderList: React.FC = () => {
               endDate: new Date().toISOString()
           }
       };
-      await MockService.updateProductionOrder(selectedOp.id, updatedOp);
+      await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
       setSelectedOp(updatedOp);
       loadData();
       alert('Revisão registrada! OP movida para Embalagem.');
@@ -331,7 +332,7 @@ export const ProductionOrderList: React.FC = () => {
               packedDate: new Date().toISOString()
           }
       };
-      await MockService.updateProductionOrder(selectedOp.id, updatedOp);
+      await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
       setSelectedOp(updatedOp);
       loadData();
       alert('Ordem de Produção Finalizada e Estoque Atualizado Automaticamente!');
@@ -339,6 +340,7 @@ export const ProductionOrderList: React.FC = () => {
 
   const renderRiskPlanning = (op: ProductionOrder) => {
       if (!op.cuttingDetails) return <p className="text-gray-400 text-sm">Sem planejamento de corte.</p>;
+      
       const { plannedMatrix, plannedLayers } = op.cuttingDetails;
       return (
           <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-6">
@@ -372,97 +374,9 @@ export const ProductionOrderList: React.FC = () => {
       );
   };
 
-  // --- FULL A4 PRINT LAYOUT WITH QR CODE ---
-  const renderA4CuttingOrder = () => {
-      if (!selectedOp) return null;
-      const prod = products.find(p => p.id === selectedOp.productId);
-      const today = new Date().toLocaleDateString();
-      const qrUrl = qrToken ? `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://bhub.app/portal/${qrToken}` : '';
-
-      return (
-          <div className="w-[210mm] min-h-[297mm] bg-white p-12 mx-auto shadow-2xl printable-sheet text-gray-900 font-sans relative flex flex-col justify-between">
-              <div>
-                  {/* Header */}
-                  <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-6">
-                      <div>
-                          <h1 className="text-3xl font-bold uppercase">Ordem de Produção</h1>
-                          <div className="text-lg font-mono font-bold mt-1">Lote: {selectedOp.lotNumber}</div>
-                      </div>
-                      <div className="text-right">
-                          <div className="text-sm font-bold">Data Emissão: {today}</div>
-                          <div className="text-sm">Entrega: {new Date(selectedOp.dueDate).toLocaleDateString()}</div>
-                      </div>
-                  </div>
-
-                  {/* Product Info */}
-                  <div className="grid grid-cols-2 gap-8 mb-8">
-                      <div>
-                          <h3 className="font-bold text-sm uppercase mb-1">Produto</h3>
-                          <div className="text-xl font-bold">{prod?.sku}</div>
-                          <div>{prod?.name}</div>
-                      </div>
-                      <div>
-                          <h3 className="font-bold text-sm uppercase mb-1">Informações</h3>
-                          <div>Qtd Total: <b>{selectedOp.quantityTotal}</b></div>
-                          <div>Facção: <b>{selectedOp.subcontractor || 'Interno'}</b></div>
-                      </div>
-                  </div>
-
-                  {/* Grade Matrix */}
-                  <div className="mb-8">
-                      <h3 className="font-bold text-sm uppercase mb-2 border-b border-black pb-1">Grade de Produção</h3>
-                      <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
-                  </div>
-
-                  {/* Observations */}
-                  <div className="border border-black p-4 min-h-[150px] mb-8 relative">
-                      <div className="absolute top-0 left-0 bg-black text-white px-2 py-1 text-xs font-bold">Observações</div>
-                      <div className="mt-4 text-sm">
-                          {/* Placeholder for future observations field */}
-                          - Seguir rigorosamente a ficha técnica.
-                          <br/>- Atenção ao sentido do fio.
-                      </div>
-                  </div>
-              </div>
-
-              {/* FOOTER WITH QR CODE */}
-              <div className="border-t-2 border-black pt-6 flex justify-between items-center mt-auto">
-                  <div>
-                      <div className="text-xs uppercase font-bold text-gray-500 mb-1">Instruções para Facção / Corte</div>
-                      <p className="text-sm font-bold max-w-xs">
-                          Escaneie o código ao lado para acessar o portal, visualizar a ficha técnica e lançar a produção.
-                      </p>
-                  </div>
-                  
-                  {/* QR Code Container */}
-                  <div className="flex items-center gap-4 bg-gray-50 p-2 border border-gray-300 rounded">
-                      {qrToken ? (
-                          <>
-                              <img src={qrUrl} alt="QR Code Produção" className="w-24 h-24 mix-blend-multiply" />
-                              <div className="text-right">
-                                  <div className="text-[10px] font-bold text-gray-400 uppercase">Token de Acesso</div>
-                                  <div className="font-mono font-bold text-lg">{qrToken.substring(0, 8)}...</div>
-                                  <div className="text-[10px] text-gray-500 mt-1">
-                                      Válido até:<br/>
-                                      <b>{new Date(qrExpiry || '').toLocaleDateString()}</b>
-                                  </div>
-                              </div>
-                          </>
-                      ) : (
-                          <div className="flex flex-col items-center justify-center w-32 h-24 text-gray-400 text-xs">
-                              <QrCode size={24} className="mb-1"/>
-                              Gerando Link...
-                          </div>
-                      )}
-                  </div>
-              </div>
-          </div>
-      );
-  };
-
   return (
     <div className="space-y-6">
-      {/* ... (Existing render code for dashboard cards, filters, and list) ... */}
+      {/* ... (Header, Summary Cards, Filters - No Changes Here) ... */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 no-print">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Painel de Ordens de Produção</h1>
@@ -480,20 +394,16 @@ export const ProductionOrderList: React.FC = () => {
 
       {/* STATUS SUMMARY CARDS */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 no-print">
-          {/* Card TODOS */}
           <div 
             onClick={() => setFilters({...filters, status: ''})}
             className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-gray-500 ${filters.status === '' ? 'ring-2 ring-gray-500' : ''}`}
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-gray-100 text-gray-600 rounded-lg">
-                      <LayoutList size={20}/>
-                  </div>
+                  <div className="p-2 bg-gray-100 text-gray-600 rounded-lg"><LayoutList size={20}/></div>
                   <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">{stats.TOTAL}</span>
               </div>
               <div className="text-gray-500 text-xs font-bold uppercase">Todos</div>
           </div>
-
           {[
               { label: 'Planejamento', count: stats[OrderStatus.PLANNED], color: 'blue', icon: Layers },
               { label: 'Em Corte', count: stats[OrderStatus.CUTTING], color: 'orange', icon: Scissors },
@@ -538,10 +448,8 @@ export const ProductionOrderList: React.FC = () => {
                   <Filter size={18}/> Filtros Avançados
               </button>
           </div>
-
           {showFilters && (
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 pt-4 border-t animate-slide-down">
-                  {/* ... Existing filter inputs ... */}
                   <div>
                       <label className="block text-xs font-bold text-gray-500 mb-1">Status</label>
                       <select className="w-full border rounded p-2 text-sm bg-gray-50" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}>
@@ -560,8 +468,9 @@ export const ProductionOrderList: React.FC = () => {
           )}
       </div>
 
+      {/* TABLE */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        {/* GROUPED TABLE HEADER */}
+        {/* ... (Header and Row Rendering - No Changes Needed Here) ... */}
         <div className="bg-gray-50 border-b p-4 grid grid-cols-12 gap-4 font-bold text-gray-600 text-sm uppercase tracking-wider">
             <div className="col-span-3 pl-4">Lote / OP Principal</div>
             <div className="col-span-2">Modelos (Qtd)</div>
@@ -572,23 +481,21 @@ export const ProductionOrderList: React.FC = () => {
 
         <div className="divide-y">
             {Object.entries(groupedOps).map(([batchId, groupOps]: [string, ProductionOrder[]]) => {
+                // ... (Row rendering logic - No changes) ...
                 const isExpanded = expandedGroups[batchId];
                 const totalQtd = groupOps.reduce((acc, op) => acc + op.quantityTotal, 0);
                 const uniqueModels = new Set(groupOps.map(o => o.productId)).size;
                 const mainDate = groupOps[0]?.createdAt ? new Date(groupOps[0].createdAt).toLocaleDateString() : '-';
-                
-                // Determine Batch Status (if mixed, show Mixed)
                 const statuses = Array.from(new Set(groupOps.map(o => o.status)));
-                const batchStatus = statuses.length === 1 ? statuses[0] : 'Misto / Em Produção';
                 const canEditBatch = groupOps.every(o => o.status === OrderStatus.DRAFT || o.status === OrderStatus.PLANNED);
 
                 return (
                     <div key={batchId} className="bg-white transition-colors">
-                        {/* PARENT ROW */}
                         <div 
                             className={`grid grid-cols-12 gap-4 p-4 items-center cursor-pointer hover:bg-blue-50/50 transition-all ${isExpanded ? 'bg-blue-50/30' : ''}`}
                             onClick={() => toggleGroup(batchId)}
                         >
+                            {/* ... (Same layout) ... */}
                             <div className="col-span-3 flex items-center gap-3 pl-4">
                                 <button className="p-1 rounded hover:bg-gray-200 text-gray-500 transition-transform duration-200">
                                     {isExpanded ? <ChevronDown size={18}/> : <ChevronRight size={18}/>}
@@ -612,7 +519,6 @@ export const ProductionOrderList: React.FC = () => {
                                 )}
                             </div>
                             <div className="col-span-3 flex justify-end gap-2 pr-4" onClick={e => e.stopPropagation()}>
-                                {/* EYE BUTTON (VIEW CONSOLIDATED BATCH) */}
                                 <button
                                     onClick={(e) => handleViewBatch(e, groupOps)}
                                     className="p-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-100 hover:text-blue-600 transition-colors bg-white shadow-sm"
@@ -620,26 +526,24 @@ export const ProductionOrderList: React.FC = () => {
                                 >
                                     <Eye size={16}/>
                                 </button>
-
-                                {/* EDIT BATCH ACTION */}
                                 {canEditBatch && (
                                     <button 
                                         onClick={(e) => handleEditBatch(e, groupOps)}
                                         className="flex items-center gap-2 px-3 py-1.5 border border-blue-200 text-blue-600 rounded-lg hover:bg-blue-50 font-medium text-xs transition-colors"
-                                        title="Editar Lote Completo (Reabre Wizard)"
+                                        title="Editar Lote Completo"
                                     >
                                         <Edit2 size={14}/> Editar Lote
                                     </button>
                                 )}
                                 {!canEditBatch && (
-                                    <span className="text-xs text-gray-400 flex items-center gap-1 cursor-help" title="Lote já em produção não pode ser editado em massa.">
+                                    <span className="text-xs text-gray-400 flex items-center gap-1 cursor-help" title="Lote já em produção">
                                         <AlertCircle size={14}/> Em Produção
                                     </span>
                                 )}
                             </div>
                         </div>
 
-                        {/* CHILDREN ROWS (ACCORDION) */}
+                        {/* EXPANDED ROWS */}
                         {isExpanded && (
                             <div className="border-t border-gray-100 bg-gray-50/50 pl-12 pr-4 py-2">
                                 <table className="w-full text-sm">
@@ -693,8 +597,8 @@ export const ProductionOrderList: React.FC = () => {
       {/* MANAGING MODAL - FULL SCREEN REPORT STYLE */}
       {selectedOp && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-           {/* ... existing modal structure ... */}
            <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl h-[95vh] flex flex-col overflow-hidden animate-scale-in">
+              {/* MODAL HEADER */}
               <div className="bg-slate-900 p-4 text-white flex justify-between items-center shadow-md shrink-0">
                  <div className="flex items-center gap-6">
                     <div className="flex flex-col">
@@ -709,7 +613,6 @@ export const ProductionOrderList: React.FC = () => {
                      <div className="h-8 w-px bg-slate-700"></div>
                     <div className="flex flex-col">
                         <span className="text-xs text-slate-400 uppercase tracking-wider">Status</span>
-                        {/* If it's a batch, show specific label, else Badge */}
                         {selectedOp.id.startsWith('BATCH-') ? (
                             <span className="px-2 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-600">Visualização Lote</span>
                         ) : (
@@ -718,7 +621,7 @@ export const ProductionOrderList: React.FC = () => {
                     </div>
                  </div>
                  <div className="flex gap-2">
-                     <button onClick={() => setIsLabelModalOpen(true)} className="p-2 hover:bg-slate-700 rounded text-slate-300" title="Imprimir Ordem/QR"><Printer/></button>
+                     <button onClick={() => window.print()} className="p-2 hover:bg-slate-700 rounded text-slate-300"><Printer/></button>
                      <button onClick={() => setSelectedOp(null)} className="p-2 hover:bg-red-900/50 rounded text-red-400"><X/></button>
                  </div>
               </div>
@@ -758,147 +661,202 @@ export const ProductionOrderList: React.FC = () => {
                             </div>
                             <div className="bg-white p-4 rounded-lg border shadow-sm">
                                 <div className="text-gray-500 text-xs uppercase font-bold">Cortes Realizados</div>
-                                <div className="text-2xl font-bold text-orange-600">{selectedOp.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0} <span className="text-sm text-gray-400">pçs</span></div>
+                                {/* Logic adjusted for Batch View compatibility */}
+                                <div className="text-2xl font-bold text-orange-600">
+                                    {(batchChildren.length > 0 ? batchChildren : [selectedOp]).reduce((acc, op) => acc + (op.cuttingDetails?.jobs?.reduce((jAcc, job) => jAcc + job.totalPieces, 0) || 0), 0)} 
+                                    <span className="text-sm text-gray-400"> pçs</span>
+                                </div>
                             </div>
                             <div className="bg-white p-4 rounded-lg border shadow-sm">
                                 <div className="text-gray-500 text-xs uppercase font-bold">Peças Aprovadas</div>
-                                <div className="text-2xl font-bold text-green-600">{selectedOp.revisionDetails?.approvedQty || 0} <span className="text-sm text-gray-400">pçs</span></div>
+                                <div className="text-2xl font-bold text-green-600">
+                                    {(batchChildren.length > 0 ? batchChildren : [selectedOp]).reduce((acc, op) => acc + (op.revisionDetails?.approvedQty || 0), 0)}
+                                    <span className="text-sm text-gray-400"> pçs</span>
+                                </div>
                             </div>
                              <div className="bg-white p-4 rounded-lg border shadow-sm">
                                 <div className="text-gray-500 text-xs uppercase font-bold">Defeitos / Perda</div>
-                                <div className="text-2xl font-bold text-red-600">{selectedOp.revisionDetails?.rejectedQty || 0} <span className="text-sm text-gray-400">pçs</span></div>
+                                <div className="text-2xl font-bold text-red-600">
+                                    {(batchChildren.length > 0 ? batchChildren : [selectedOp]).reduce((acc, op) => acc + (op.revisionDetails?.rejectedQty || 0), 0)}
+                                    <span className="text-sm text-gray-400"> pçs</span>
+                                </div>
                             </div>
                         </div>
 
-                        {/* Detail Matrix with Risk */}
+                        {/* Detail Matrix - NOW HANDLES MULTIPLE PRODUCTS SEPARATELY */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border">
-                            <h3 className="font-bold text-gray-800 flex items-center gap-2"><Grid3X3 size={18}/> Detalhamento da Produção</h3>
-                            
-                            {/* Render Risk Planning */}
-                            {renderRiskPlanning(selectedOp)}
-
                             <div className="flex justify-between mb-4 items-center">
-                                <h4 className="font-bold text-sm text-gray-700">Grade de Produção Consolidada (Real)</h4>
+                                <h3 className="font-bold text-gray-800 flex items-center gap-2"><Grid3X3 size={18}/> Detalhamento da Produção</h3>
                                 <button onClick={() => setIsLabelModalOpen(true)} className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded hover:bg-gray-200 flex items-center gap-1">
-                                    <Printer size={12}/> Imprimir Ficha & QR
+                                    <Tag size={12}/> Etiquetas Lote
                                 </button>
                             </div>
-                            <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
+                            
+                            {batchChildren.length > 0 ? (
+                                // BATCH VIEW: Render a section for EACH child OP
+                                <div className="space-y-8">
+                                    {batchChildren.map(childOp => {
+                                        const prod = products.find(p => p.id === childOp.productId);
+                                        return (
+                                            <div key={childOp.id} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                                                <div className="flex justify-between mb-2 pb-2 border-b border-gray-200">
+                                                    <h4 className="font-bold text-blue-800 flex items-center gap-2">
+                                                        <Shirt size={16}/> {prod?.name} ({prod?.sku})
+                                                    </h4>
+                                                    <span className="text-xs font-bold bg-white px-2 py-1 rounded border">
+                                                        OP: {childOp.lotNumber} | {childOp.quantityTotal} pçs
+                                                    </span>
+                                                </div>
+                                                {/* Render Risk & Matrix for this child */}
+                                                {renderRiskPlanning(childOp)}
+                                                <SizeColorMatrix items={childOp.items} sizes={getActiveSizes(childOp)} />
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                // SINGLE VIEW: Render once
+                                <>
+                                    {renderRiskPlanning(selectedOp)}
+                                    <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
+                                </>
+                            )}
                         </div>
 
-                        {/* Timeline */}
+                        {/* Timeline - Enhanced with User & Precise Time */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border">
-                            <h3 className="font-bold text-gray-800 mb-4">Histórico de Eventos</h3>
-                            <div className="space-y-4">
-                                <div className="flex gap-4">
-                                    <div className="w-24 text-sm text-gray-500 text-right">{new Date(selectedOp.createdAt).toLocaleDateString()}</div>
-                                    <div className="flex-1 pb-4 border-l-2 border-gray-200 pl-4 relative">
-                                        <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-blue-500 border-2 border-white"></div>
-                                        <div className="font-bold text-sm">OP Criada</div>
-                                        <div className="text-xs text-gray-500">Planejamento iniciado por PCP.</div>
-                                    </div>
-                                </div>
+                            <h3 className="font-bold text-gray-800 mb-4">Histórico de Rastreabilidade</h3>
+                            <div className="space-y-6 relative pl-4 border-l-2 border-gray-200 ml-4">
                                 {selectedOp.events?.map((ev, i) => (
-                                    <div key={i} className="flex gap-4">
-                                        <div className="w-24 text-sm text-gray-500 text-right">{new Date(ev.date).toLocaleDateString()}</div>
-                                        <div className="flex-1 pb-4 border-l-2 border-gray-200 pl-4 relative">
-                                            <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-indigo-500 border-2 border-white"></div>
-                                            <div className="font-bold text-sm">{ev.action}</div>
-                                            <div className="text-xs text-gray-500">{ev.description}</div>
+                                    <div key={i} className="relative pl-6">
+                                        <div className="absolute -left-[31px] top-0 w-6 h-6 rounded-full bg-white border-4 border-blue-500"></div>
+                                        
+                                        <div className="flex justify-between items-start">
+                                            <div className="font-bold text-gray-800">{ev.action}</div>
+                                            <div className="text-xs text-gray-400 flex items-center gap-1 bg-gray-50 px-2 py-1 rounded border">
+                                                <Calendar size={12}/> {new Date(ev.date).toLocaleString()}
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="text-sm text-gray-600 mt-1 mb-2 bg-gray-50 p-2 rounded border border-gray-100">
+                                            {ev.description}
+                                        </div>
+                                        
+                                        <div className="flex items-center gap-2 text-xs">
+                                            <span className="text-gray-400 font-medium">Responsável:</span>
+                                            <span className="flex items-center gap-1 font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">
+                                                <User size={10}/> {ev.user || 'Sistema'}
+                                            </span>
                                         </div>
                                     </div>
                                 ))}
+                                {selectedOp.events?.length === 0 && (
+                                    <p className="text-gray-400 italic text-sm">Nenhum evento registrado.</p>
+                                )}
                             </div>
                         </div>
                     </div>
                  )}
 
-                 {/* REVISION TAB */}
+                 {/* ... (Revision and Packing tabs remain largely same, viewing total or blocking edit for batch) ... */}
                  {activeTab === 'revision' && (
                      <div className="max-w-4xl mx-auto">
-                         <h3 className="font-bold text-gray-800 text-lg mb-6 flex items-center gap-2"><ClipboardCheck size={20}/> Controle de Qualidade</h3>
-                         <div className="bg-white p-8 rounded-xl shadow-sm border grid grid-cols-2 gap-12">
-                             <div className="space-y-6">
-                                 <div>
-                                     <label className="block text-sm font-bold text-gray-700 mb-1">Responsável Revisão</label>
-                                     <input className="w-full border rounded p-3" placeholder="Nome do revisor"
-                                        value={revisionForm.inspectorName} onChange={e => setRevisionForm({...revisionForm, inspectorName: e.target.value})}/>
-                                 </div>
-                                 <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                                     <label className="block text-sm font-bold text-green-800 mb-1">Peças Aprovadas (1ª Qualidade)</label>
-                                     <input type="number" className="w-full border rounded p-3 text-2xl font-bold text-green-700" 
-                                        value={revisionForm.approvedQty} onChange={e => setRevisionForm({...revisionForm, approvedQty: Number(e.target.value)})}/>
-                                 </div>
-                                 <div className="grid grid-cols-2 gap-4">
-                                     <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100">
-                                        <label className="block text-xs font-bold text-yellow-800 mb-1">Retrabalho / 2ª</label>
-                                        <input type="number" className="w-full border rounded p-2 font-bold text-yellow-700"
-                                            value={revisionForm.reworkQty} onChange={e => setRevisionForm({...revisionForm, reworkQty: Number(e.target.value)})}/>
+                         {batchChildren.length > 0 ? (
+                             <div className="text-center p-12 text-gray-500">
+                                 <AlertCircle size={48} className="mx-auto mb-4 opacity-20"/>
+                                 <p>Para realizar o apontamento de qualidade, acesse as OPs individualmente.</p>
+                             </div>
+                         ) : (
+                             // EXISTING REVISION FORM
+                             <div className="bg-white p-8 rounded-xl shadow-sm border grid grid-cols-2 gap-12">
+                                 <div className="space-y-6">
+                                     <div>
+                                         <label className="block text-sm font-bold text-gray-700 mb-1">Responsável Revisão</label>
+                                         <input className="w-full border rounded p-3" placeholder="Nome do revisor"
+                                            value={revisionForm.inspectorName} onChange={e => setRevisionForm({...revisionForm, inspectorName: e.target.value})}/>
                                      </div>
-                                     <div className="p-4 bg-red-50 rounded-lg border border-red-100">
-                                        <label className="block text-xs font-bold text-red-800 mb-1">Perda / Defeito</label>
-                                        <input type="number" className="w-full border rounded p-2 font-bold text-red-700"
-                                            value={revisionForm.rejectedQty} onChange={e => setRevisionForm({...revisionForm, rejectedQty: Number(e.target.value)})}/>
+                                     <div className="p-4 bg-green-50 rounded-lg border border-green-100">
+                                         <label className="block text-sm font-bold text-green-800 mb-1">Peças Aprovadas (1ª Qualidade)</label>
+                                         <input type="number" className="w-full border rounded p-3 text-2xl font-bold text-green-700" 
+                                            value={revisionForm.approvedQty} onChange={e => setRevisionForm({...revisionForm, approvedQty: Number(e.target.value)})}/>
                                      </div>
+                                     <div className="grid grid-cols-2 gap-4">
+                                         <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100">
+                                            <label className="block text-xs font-bold text-yellow-800 mb-1">Retrabalho / 2ª</label>
+                                            <input type="number" className="w-full border rounded p-2 font-bold text-yellow-700"
+                                                value={revisionForm.reworkQty} onChange={e => setRevisionForm({...revisionForm, reworkQty: Number(e.target.value)})}/>
+                                         </div>
+                                         <div className="p-4 bg-red-50 rounded-lg border border-red-100">
+                                            <label className="block text-xs font-bold text-red-800 mb-1">Perda / Defeito</label>
+                                            <input type="number" className="w-full border rounded p-2 font-bold text-red-700"
+                                                value={revisionForm.rejectedQty} onChange={e => setRevisionForm({...revisionForm, rejectedQty: Number(e.target.value)})}/>
+                                         </div>
+                                     </div>
+                                 </div>
+                                 <div className="flex flex-col justify-between">
+                                     <div className="bg-gray-50 p-4 rounded text-sm text-gray-600 mb-4">
+                                         <h4 className="font-bold mb-2">Resumo da OP</h4>
+                                         <div className="flex justify-between mb-1"><span>Total Cortado:</span> <span className="font-bold">{selectedOp.quantityTotal}</span></div>
+                                         <div className="flex justify-between border-t pt-2 mt-2">
+                                             <span>Total Apontado:</span> 
+                                             <span className="font-bold">{(revisionForm.approvedQty||0) + (revisionForm.reworkQty||0) + (revisionForm.rejectedQty||0)}</span>
+                                         </div>
+                                     </div>
+                                     <button onClick={saveRevision} className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg">
+                                         Salvar e Mover para Embalagem
+                                     </button>
                                  </div>
                              </div>
-                             <div className="flex flex-col justify-between">
-                                 <div className="bg-gray-50 p-4 rounded text-sm text-gray-600 mb-4">
-                                     <h4 className="font-bold mb-2">Resumo da OP</h4>
-                                     <div className="flex justify-between mb-1"><span>Total Cortado:</span> <span className="font-bold">{selectedOp.quantityTotal}</span></div>
-                                     <div className="flex justify-between border-t pt-2 mt-2">
-                                         <span>Total Apontado:</span> 
-                                         <span className="font-bold">{(revisionForm.approvedQty||0) + (revisionForm.reworkQty||0) + (revisionForm.rejectedQty||0)}</span>
-                                     </div>
-                                 </div>
-                                 <button onClick={saveRevision} className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg">
-                                     Salvar e Mover para Embalagem
-                                 </button>
-                             </div>
-                         </div>
+                         )}
                      </div>
                  )}
 
-                 {/* PACKING TAB */}
                  {activeTab === 'packing' && (
                      <div className="max-w-4xl mx-auto">
-                        <h3 className="font-bold text-gray-800 text-lg mb-6 flex items-center gap-2"><Package size={20}/> Embalagem & Finalização</h3>
-                        <div className="bg-white p-8 rounded-xl shadow-sm border">
-                             <div className="grid grid-cols-2 gap-8 mb-8">
-                                 <div>
-                                     <label className="block text-sm font-bold text-gray-700 mb-1">Tipo de Embalagem</label>
-                                     <select className="w-full border rounded p-3 bg-white" 
-                                        value={packingForm.packingType} onChange={e => setPackingForm({...packingForm, packingType: e.target.value})}>
-                                         <option>Caixa Padrão</option>
-                                         <option>Saco Individual</option>
-                                         <option>Cabide</option>
-                                     </select>
-                                 </div>
-                                 <div>
-                                     <label className="block text-sm font-bold text-gray-700 mb-1">Total de Volumes (Caixas)</label>
-                                     <input type="number" className="w-full border rounded p-3" 
-                                        value={packingForm.totalBoxes} onChange={e => setPackingForm({...packingForm, totalBoxes: Number(e.target.value)})}/>
-                                 </div>
+                        {batchChildren.length > 0 ? (
+                             <div className="text-center p-12 text-gray-500">
+                                 <AlertCircle size={48} className="mx-auto mb-4 opacity-20"/>
+                                 <p>Para realizar a embalagem e baixa, acesse as OPs individualmente.</p>
                              </div>
-                             
-                             <div className="bg-pink-50 border border-pink-100 rounded-xl p-6 mb-8 text-center">
-                                 <label className="block text-sm font-bold text-pink-800 mb-2">Quantidade Total Embalada (Produto Acabado)</label>
-                                 <input type="number" className="text-4xl font-bold text-pink-700 bg-transparent text-center w-full focus:outline-none" 
-                                    value={packingForm.totalPackedQty || selectedOp.revisionDetails?.approvedQty || 0}
-                                    onChange={e => setPackingForm({...packingForm, totalPackedQty: Number(e.target.value)})}
-                                 />
-                                 <p className="text-xs text-pink-500 mt-2">Esta quantidade entrará no estoque de produto acabado.</p>
-                             </div>
+                        ) : (
+                            // EXISTING PACKING FORM
+                            <div className="bg-white p-8 rounded-xl shadow-sm border">
+                                 <div className="grid grid-cols-2 gap-8 mb-8">
+                                     <div>
+                                         <label className="block text-sm font-bold text-gray-700 mb-1">Tipo de Embalagem</label>
+                                         <select className="w-full border rounded p-3 bg-white" 
+                                            value={packingForm.packingType} onChange={e => setPackingForm({...packingForm, packingType: e.target.value})}>
+                                             <option>Caixa Padrão</option>
+                                             <option>Saco Individual</option>
+                                             <option>Cabide</option>
+                                         </select>
+                                     </div>
+                                     <div>
+                                         <label className="block text-sm font-bold text-gray-700 mb-1">Total de Volumes (Caixas)</label>
+                                         <input type="number" className="w-full border rounded p-3" 
+                                            value={packingForm.totalBoxes} onChange={e => setPackingForm({...packingForm, totalBoxes: Number(e.target.value)})}/>
+                                     </div>
+                                 </div>
+                                 
+                                 <div className="bg-pink-50 border border-pink-100 rounded-xl p-6 mb-8 text-center">
+                                     <label className="block text-sm font-bold text-pink-800 mb-2">Quantidade Total Embalada (Produto Acabado)</label>
+                                     <input type="number" className="text-4xl font-bold text-pink-700 bg-transparent text-center w-full focus:outline-none" 
+                                        value={packingForm.totalPackedQty || selectedOp.revisionDetails?.approvedQty || 0}
+                                        onChange={e => setPackingForm({...packingForm, totalPackedQty: Number(e.target.value)})}
+                                     />
+                                     <p className="text-xs text-pink-500 mt-2">Esta quantidade entrará no estoque de produto acabado.</p>
+                                 </div>
 
-                             <div className="flex justify-between items-center border-t pt-6">
-                                 <button className="text-gray-500 hover:text-gray-800 flex items-center gap-2 text-sm">
-                                     <Printer size={18}/> Imprimir Etiquetas de Caixa
-                                 </button>
-                                 <button onClick={savePacking} className="bg-green-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-green-700 shadow-lg flex items-center gap-2">
-                                     <CheckCircle size={20}/> Finalizar OP & Atualizar Estoque
-                                 </button>
-                             </div>
-                        </div>
+                                 <div className="flex justify-between items-center border-t pt-6">
+                                     <button className="text-gray-500 hover:text-gray-800 flex items-center gap-2 text-sm">
+                                         <Printer size={18}/> Imprimir Etiquetas de Caixa
+                                     </button>
+                                     <button onClick={savePacking} className="bg-green-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-green-700 shadow-lg flex items-center gap-2">
+                                         <CheckCircle size={20}/> Finalizar OP & Atualizar Estoque
+                                     </button>
+                                 </div>
+                            </div>
+                        )}
                      </div>
                  )}
               </div>
@@ -906,15 +864,39 @@ export const ProductionOrderList: React.FC = () => {
         </div>
       )}
 
-      {/* LABEL & QR PRINTING MODAL (UPDATED) */}
+      {/* LABEL PRINTING MODAL */}
       {selectedOp && isLabelModalOpen && (
-          <div className="fixed inset-0 bg-gray-500/90 z-[60] flex justify-center overflow-y-auto">
-              <div className="relative my-8">
-                  <div className="absolute -top-10 right-0 flex gap-2 no-print">
-                      <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2"><Printer size={18}/> Imprimir</button>
-                      <button onClick={() => setIsLabelModalOpen(false)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded shadow font-bold hover:bg-gray-300 flex items-center gap-2"><X size={18}/> Fechar</button>
+          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4">
+              <div className="bg-white rounded-lg w-full max-w-2xl h-[80vh] flex flex-col">
+                  <div className="p-4 border-b flex justify-between items-center bg-gray-50 no-print">
+                      <h3 className="font-bold">Etiquetas de Lote</h3>
+                      <div className="flex gap-2">
+                        <button onClick={() => window.print()} className="bg-blue-600 text-white px-3 py-1 rounded">Imprimir</button>
+                        <button onClick={() => setIsLabelModalOpen(false)} className="bg-gray-200 px-3 py-1 rounded">Fechar</button>
+                      </div>
                   </div>
-                  {renderA4CuttingOrder()}
+                  <div className="flex-1 overflow-y-auto p-8 printable-sheet">
+                      <div className="grid grid-cols-2 gap-4">
+                          {[1,2,3,4].map(n => (
+                              <div key={n} className="border-2 border-black p-4 flex flex-col justify-between h-48 break-inside-avoid">
+                                  <div className="flex justify-between items-start">
+                                      <div>
+                                        <h2 className="font-bold text-xl">{selectedOp.lotNumber}</h2>
+                                        <p className="text-sm font-mono">{selectedOp.productId}</p>
+                                      </div>
+                                      <div className="w-12 h-12 bg-black"></div> 
+                                  </div>
+                                  <div className="text-center font-bold text-2xl border-y py-2 my-2">
+                                      Tamanho: M
+                                  </div>
+                                  <div className="flex justify-between text-xs">
+                                      <span>Cor: Branco</span>
+                                      <span>Pct: {n}/10</span>
+                                  </div>
+                              </div>
+                          ))}
+                      </div>
+                  </div>
               </div>
           </div>
       )}

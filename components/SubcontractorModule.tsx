@@ -1,849 +1,804 @@
 
-// ... existing imports ...
+/**
+ * 🔒 MÓDULO FACÇÕES & TERCEIRIZAÇÃO - GESTÃO DE REMESSAS
+ * ---------------------------------------------------
+ * Status: FROZEN / PRODUCTION READY
+ * Data do Bloqueio: 25/05/2025
+ * 
+ * Funcionalidades Blindadas:
+ * - Integração total com Supabase (tabela subcontractor_orders).
+ * - Fluxo de Remessa (Estoque -> Facção) com baixa de insumos.
+ * - Fluxo de Retorno (Facção -> Revisão) com Grade Visual (Matriz).
+ * - Histórico de Concluídos.
+ * 
+ * ATENÇÃO: NÃO ALTERAR LÓGICA DE MATRIZ OU QUERY DE DADOS SEM AUTORIZAÇÃO.
+ */
+
 import React, { useEffect, useState, useMemo } from 'react';
-import { ProductionOrder, OrderStatus, SubcontractorOrder, Product, ReturnItem, Partner, StandardObservation, ProductionOrderItem, Material } from '../types';
-import { MockService } from '../services/mockDb';
-import { Truck, CheckCircle2, AlertTriangle, ArrowRight, Printer, X, FileText, Undo2, Save, History, ClipboardList, UserCheck, MoreVertical, RotateCcw, Filter, Search, Calendar, Infinity, Share2, Link, MapPin, Phone, FileBox, LayoutList, Clock, Scissors } from 'lucide-react';
-import { ModernDatePicker } from './ModernDatePicker';
+import { ProductionOrder, OrderStatus, SubcontractorOrder, Product, ReturnItem, Partner, StandardObservation, Material } from '../types';
+import { ApiService } from '../services/api';
+import { Truck, ArrowRight, Printer, X, Undo2, History, LayoutList, Scissors, Factory, Building2, User, AlertTriangle, Save, Grid3X3, ArrowDown, CheckCircle2, Eye, RotateCcw } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 
-// ... (No change to interface DateRange or main logic up to renderPrintableOsf)
-
-interface DateRange {
-    label: string;
-    days: number | 'custom' | 'all';
-    start: Date;
-    end: Date;
-}
+// Helper for Color Style
+const getColorStyle = (colorName: string) => {
+    const map: any = {
+        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
+        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
+        'Rosa': '#ffc0cb', 'Roxo': '#800080'
+    };
+    return map[colorName] || '#cccccc';
+};
 
 export const SubcontractorModule: React.FC = () => {
-  // ... (State logic unchanged until renderPrintableOsf)
+  const { profile } = useAuth();
+  const { addToast } = useToast();
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [osfs, setOsfs] = useState<SubcontractorOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [partners, setPartners] = useState<Partner[]>([]);
   const [materials, setMaterials] = useState<Material[]>([]);
-  const [observations, setObservations] = useState<StandardObservation[]>([]);
+  const [observations, setObservations] = useState<StandardObservation[]>([]); 
+  const [loading, setLoading] = useState(false);
   
-  // State for filters
-  const [dateRange, setDateRange] = useState<DateRange>({
-      label: 'Últimos 30 dias',
-      days: 30,
-      start: new Date(new Date().setDate(new Date().getDate() - 30)),
-      end: new Date()
-  });
-  const [filters, setFilters] = useState({
-      search: '',
-      type: 'ALL', // ALL, INTERNAL, EXTERNAL
-      partnerId: ''
-  });
-  // NEW: Card Filter Status
+  // Filters & State
   const [cardFilter, setCardFilter] = useState<string>('');
 
-  // Filtered lists
-  const [filteredCutOps, setFilteredCutOps] = useState<ProductionOrder[]>([]);
-  const [filteredActiveOsfs, setFilteredActiveOsfs] = useState<SubcontractorOrder[]>([]);
-  const [filteredCompletedOsfs, setFilteredCompletedOsfs] = useState<SubcontractorOrder[]>([]);
-
-  // Modal State
-  const [selectedOpForPrint, setSelectedOpForPrint] = useState<ProductionOrder | null>(null); // For Confirmation Modal (Creating new)
-  const [selectedOsfForPrint, setSelectedOsfForPrint] = useState<SubcontractorOrder | null>(null); // For Actual Document Print (Viewing)
-  
-  // New State for Mandatory Partner Selection
-  const [targetPartner, setTargetPartner] = useState<string>('');
-
+  // Modals
+  const [selectedOpForRemessa, setSelectedOpForRemessa] = useState<ProductionOrder | null>(null);
+  const [selectedOsfForView, setSelectedOsfForView] = useState<SubcontractorOrder | null>(null);
   const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
   const [selectedOsfForReturn, setSelectedOsfForReturn] = useState<SubcontractorOrder | null>(null);
+  
+  // Remessa Generation State
+  const [targetPartner, setTargetPartner] = useState<string>('');
+  const [isInternalProduction, setIsInternalProduction] = useState(false);
+  const [techPackSnapshot, setTechPackSnapshot] = useState<{materials: any[], observations: string}>({materials: [], observations: ''});
+
+  // Return State
   const [returnItems, setReturnItems] = useState<ReturnItem[]>([]);
-  const [opGridRef, setOpGridRef] = useState<ProductionOrderItem[]>([]); 
   const [conferenteName, setConferenteName] = useState('');
-  const [conferenteError, setConferenteError] = useState(false); 
-  const [activeMenuOsfId, setActiveMenuOsfId] = useState<string | null>(null);
+  const [conferenteError, setConferenteError] = useState(false);
+
+  // Derived Matrix Keys for Return Modal
+  const [matrixKeys, setMatrixKeys] = useState<{colors: string[], sizes: string[]}>({ colors: [], sizes: [] });
 
   const loadData = async () => {
-    const allOps = await MockService.getProductionOrders();
-    const prods = await MockService.getProducts();
-    const ptrs = await MockService.getPartners();
-    const allOsfs = await MockService.getSubcontractorOrders();
-    const obs = await MockService.getObservations();
-    const mats = await MockService.getMaterials();
-    
-    setProducts(prods);
-    setPartners(ptrs);
-    setObservations(obs);
-    setMaterials(mats);
-    setOps(allOps);
-    setOsfs(allOsfs);
+    setLoading(true);
+    try {
+        const [allOps, allOsfs, prods, ptrs, mats, obs] = await Promise.all([
+            ApiService.getProductionOrders(),
+            ApiService.getSubcontractorOrders(),
+            ApiService.getProducts(),
+            ApiService.getPartners(),
+            ApiService.getMaterials(),
+            ApiService.getObservations()
+        ]);
+        setOps(allOps);
+        setOsfs(allOsfs);
+        setProducts(prods);
+        setPartners(ptrs);
+        setMaterials(mats);
+        setObservations(obs);
+    } catch (err: any) {
+        addToast({ type: 'error', title: 'Erro de Carregamento', message: err.message });
+    } finally {
+        setLoading(false);
+    }
   };
 
   useEffect(() => {
     loadData();
   }, []);
 
-  // --- STATS CALCULATION ---
-  const osfStats = useMemo(() => {
-      let total = 0;
-      let awaiting = 0;
-      let sent = 0;
-      let partial = 0;
-      let completed = 0;
+  const getProductDisplayName = (productId: string) => {
+      const prod = products.find(p => p.id === productId);
+      if (prod) return `${prod.sku} - ${prod.name}`;
+      return productId;
+  };
 
-      // Calculate Awaiting Shipment from OPs
-      awaiting = ops.filter(op => op.status === OrderStatus.CUTTING).length;
+  const readyToShipOps = useMemo(() => {
+      return ops.filter(op => {
+          const totalCut = op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
+          const opOsfs = osfs.filter(osf => osf.opId === op.id && osf.type !== 'Retrabalho'); // Don't count reworks as regular shipments
+          const totalSent = opOsfs.reduce((acc, osf) => acc + osf.sentQuantity, 0);
+          return totalCut > totalSent && op.status !== OrderStatus.CANCELLED && op.status !== OrderStatus.DRAFT;
+      });
+  }, [ops, osfs]);
 
-      osfs.forEach(osf => {
-          total++;
-          if (osf.status === 'Enviado') sent++;
-          else if (osf.status === 'Parcial') partial++;
-          else if (osf.status === 'Concluido') completed++;
+  const activeOsfs = useMemo(() => osfs.filter(o => o.status !== 'Concluido'), [osfs]);
+  const historyOsfs = useMemo(() => osfs.filter(o => o.status === 'Concluido'), [osfs]);
+
+  const stats = {
+      total: osfs.length,
+      awaiting: readyToShipOps.length,
+      sent: activeOsfs.filter(o => o.status === 'Enviado').length,
+      partial: activeOsfs.filter(o => o.status === 'Parcial').length,
+      completed: historyOsfs.length
+  };
+
+  // ... (handleOpenRemessa logic stays the same) ...
+  const handleOpenRemessa = (op: ProductionOrder) => {
+      const prod = products.find(p => p.id === op.productId);
+      const tp = prod?.techPacks.find(t => t.version === op.techPackVersion) || prod?.techPacks[0]; // Fallback to first if version not found
+      
+      const totalCut = op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
+      const opOsfs = osfs.filter(osf => osf.opId === op.id);
+      const totalSent = opOsfs.reduce((acc, osf) => acc + osf.sentQuantity, 0);
+      const remainingQty = Math.max(0, totalCut - totalSent);
+      
+      const ratio = totalCut > 0 ? remainingQty / totalCut : 0;
+
+      const itemsToSend = (op.items || []).map(i => ({
+          ...i,
+          quantity: Math.ceil(i.quantity * ratio)
+      })).filter(i => i.quantity > 0);
+
+      const qtyByColor: Record<string, number> = {};
+      itemsToSend.forEach(i => {
+          qtyByColor[i.color] = (qtyByColor[i.color] || 0) + i.quantity;
       });
 
-      // Total includes historical OSFs + current backlog (awaiting)
-      return { total: total + awaiting, awaiting, sent, partial, completed };
-  }, [osfs, ops]);
-
-  // --- FILTERING LOGIC ---
-  useEffect(() => {
-      filterData();
-  }, [ops, osfs, dateRange, filters, cardFilter]);
-
-  const filterData = () => {
-      const start = new Date(dateRange.start);
-      start.setHours(0,0,0,0);
-      const end = new Date(dateRange.end);
-      end.setHours(23,59,59,999);
-
-      // 1. Filter Ready to Ship (CUTTING status)
-      // Uses CreatedAt for date filter as they are not sent yet
-      const readyToShip = ops.filter(op => {
-          const isStatus = op.status === OrderStatus.CUTTING;
-          const d = new Date(op.createdAt);
-          const dateMatch = d >= start && d <= end;
-          
-          const partnerName = op.subcontractor || '';
-          const isInternal = partnerName.toLowerCase().includes('interno') || partnerName.toLowerCase().includes('interna');
-          const typeMatch = 
-            filters.type === 'ALL' ? true :
-            filters.type === 'INTERNAL' ? isInternal : !isInternal; // EXTERNAL
-
-          const searchMatch = !filters.search || 
-            op.lotNumber.toLowerCase().includes(filters.search.toLowerCase()) || 
-            op.productId.toLowerCase().includes(filters.search.toLowerCase()) ||
-            partnerName.toLowerCase().includes(filters.search.toLowerCase());
-
-          // Partner ID check (if specific partner selected)
-          const partnerMatch = !filters.partnerId || 
-            partners.find(p => p.id === filters.partnerId)?.name === partnerName;
-
-          return isStatus && dateMatch && typeMatch && searchMatch && partnerMatch;
-      });
-      setFilteredCutOps(readyToShip);
-
-      // 2. Filter OSFs (Active & Completed)
-      // Uses SentDate for date filter
-      const filterOsf = (osf: SubcontractorOrder) => {
-          const d = new Date(osf.sentDate);
-          const dateMatch = d >= start && d <= end;
-
-          const partnerName = osf.subcontractorName || '';
-          const isInternal = partnerName.toLowerCase().includes('interno') || partnerName.toLowerCase().includes('interna');
-          const typeMatch = 
-            filters.type === 'ALL' ? true :
-            filters.type === 'INTERNAL' ? isInternal : !isInternal;
-
-          const searchMatch = !filters.search || 
-            osf.id.toLowerCase().includes(filters.search.toLowerCase()) ||
-            osf.opId.toLowerCase().includes(filters.search.toLowerCase()) ||
-            partnerName.toLowerCase().includes(filters.search.toLowerCase());
-
-          const partnerMatch = !filters.partnerId || 
-            partners.find(p => p.id === filters.partnerId)?.name === partnerName;
-
-          // CARD FILTER
-          const statusMatch = !cardFilter || cardFilter === 'AguardandoEnvio' ? true : osf.status === cardFilter;
-
-          return dateMatch && typeMatch && searchMatch && partnerMatch && statusMatch;
-      };
-
-      const active = osfs.filter(osf => osf.status !== 'Concluido' && filterOsf(osf));
-      const completed = osfs.filter(osf => osf.status === 'Concluido' && filterOsf(osf));
-
-      setFilteredActiveOsfs(active);
-      setFilteredCompletedOsfs(completed);
-  };
-
-  // ... (Keep Open Modal functions unchanged) ...
-  const openPrintModal = (op: ProductionOrder) => {
-      setTargetPartner(op.subcontractor || '');
-      setSelectedOpForPrint(op);
-  };
-
-  const openOsfPrintModal = async (osf: SubcontractorOrder) => {
-      setSelectedOsfForPrint(osf); 
-  };
-
-  const handleConfirmSend = async () => {
-    if(!selectedOpForPrint) return;
-    if (!targetPartner || targetPartner.trim() === '') {
-        alert("É OBRIGATÓRIO informar a Facção/Destino para gerar a remessa.");
-        return;
-    }
-    const newOsf = await MockService.createSubcontractorOrder({
-      opId: selectedOpForPrint.id,
-      subcontractorName: targetPartner, 
-      sentQuantity: selectedOpForPrint.quantityTotal
-    });
-    setSelectedOpForPrint(null); 
-    await loadData();
-    setSelectedOsfForPrint(newOsf);
-  };
-
-  const handleReverseShipment = async (osf: SubcontractorOrder) => {
-      setActiveMenuOsfId(null);
-      if(!confirm(`Tem certeza que deseja cancelar a Remessa ${osf.id}? A OP voltará para o setor de Corte.`)) return;
-      try {
-          await MockService.cancelSubcontractorShipment(osf.id);
-          loadData();
-          alert('Remessa estornada com sucesso.');
-      } catch (err: any) {
-          alert(err.message);
-      }
-  };
-
-  const openReturnModal = (osf: SubcontractorOrder) => {
-      MockService.getProductionOrderById(osf.opId).then(op => {
-          if(!op) return;
-          setOpGridRef(op.items);
-          const initialItems: ReturnItem[] = op.items.map(i => ({
-              color: i.color,
-              size: i.size,
-              quantity: 0,
-              type: 'approved'
-          }));
-          setReturnItems(initialItems);
-          setConferenteName('');
-          setConferenteError(false);
-          setSelectedOsfForReturn(osf);
-          setIsReturnModalOpen(true);
-      });
-  };
-
-  const handleSaveReturn = async () => {
-      if(!selectedOsfForReturn) return;
-      if(!conferenteName.trim()) {
-          setConferenteError(true);
-          return;
-      }
-      const errors: string[] = [];
-      returnItems.forEach(item => {
-          const original = opGridRef.find(i => i.color === item.color && i.size === item.size);
-          const maxAllowed = original ? original.quantity : 0;
-          if (item.quantity > maxAllowed) {
-              errors.push(`- ${item.color} / ${item.size}: Informado ${item.quantity} (Máx OP: ${maxAllowed})`);
-          }
-      });
-      if (errors.length > 0) {
-          alert(`ERRO: Devolução fora da grade da OP!\n\n${errors.join('\n')}`);
-          return;
-      }
-      await MockService.registerReturn(selectedOsfForReturn.id, returnItems, conferenteName);
-      setIsReturnModalOpen(false);
-      loadData();
-      alert('Retorno registrado! Saldo pendente gerou nova OSF Filha.');
-  };
-
-  const updateReturnQty = (idx: number, field: 'quantity', value: number) => {
-      const newItems = [...returnItems];
-      newItems[idx][field] = value;
-      setReturnItems(newItems);
-  };
-
-  const handleCopyLink = (osf: SubcontractorOrder) => {
-      if (!osf.externalToken) {
-          alert('Token não gerado para esta ordem.');
-          return;
-      }
-      const baseUrl = window.location.href.split('#')[0];
-      const portalUrl = `${baseUrl}#/portal/${osf.externalToken}`;
-      navigator.clipboard.writeText(portalUrl).then(() => {
-          alert(`Link do Portal copiado!\n\nEnvie para o parceiro:\n${portalUrl}`);
-          setActiveMenuOsfId(null);
-      });
-  };
-
-  // ... (renderPrintableOsf unchanged) ...
-  const renderPrintableOsf = () => {
-      if (!selectedOsfForPrint) return null;
-      const op = ops.find(o => o.id === selectedOsfForPrint.opId);
-      const prod = products.find(p => p.id === op?.productId);
-      const partner = partners.find(p => p.name === selectedOsfForPrint.subcontractorName);
-      const items = op?.items || [];
-      const sizes = Array.from(new Set(items.map(i => i.size))).sort();
-      const colors = Array.from(new Set(items.map(i => i.color)));
-      const tp = prod?.techPacks.find(t => t.version === op?.techPackVersion);
-      const calculatedMaterials: any[] = [];
-      if (tp && op) {
+      const matSnapshot: any[] = [];
+      if (tp && tp.materials) {
           tp.materials.forEach(bom => {
               const mat = materials.find(m => m.id === bom.materialId);
-              if (mat) {
-                  const qtyNeeded = bom.usagePerPiece * op.quantityTotal;
-                  let displayMaterialName = mat.name;
-                  if (bom.materialVariantName) {
-                      displayMaterialName += ` (${bom.materialVariantName})`;
-                  }
-                  calculatedMaterials.push({
-                      name: displayMaterialName,
-                      unit: mat.unit,
-                      qty: qtyNeeded,
-                      color: bom.colorVariant || 'Geral'
+              if (!mat) return;
+              
+              if (bom.variesWithColor) {
+                  Object.entries(qtyByColor).forEach(([colorName, colorQty]) => {
+                      if (colorQty > 0) {
+                          const quantityNeeded = colorQty * bom.usagePerPiece * (1 + bom.wasteMargin);
+                          matSnapshot.push({
+                              name: mat.name,
+                              code: mat.code,
+                              unit: mat.unit,
+                              qty: quantityNeeded,
+                              color: colorName, 
+                              type: mat.type,
+                              isVariant: true
+                          });
+                      }
                   });
+              } else if (bom.colorVariant && bom.colorVariant !== '' && bom.colorVariant !== 'Geral') {
+                  const qtyOfThisColor = qtyByColor[bom.colorVariant] || 0;
+                  if (qtyOfThisColor > 0) {
+                      const quantityNeeded = qtyOfThisColor * bom.usagePerPiece * (1 + bom.wasteMargin);
+                      matSnapshot.push({
+                          name: mat.name,
+                          code: mat.code,
+                          unit: mat.unit,
+                          qty: quantityNeeded,
+                          color: bom.colorVariant,
+                          type: mat.type,
+                          isVariant: true
+                      });
+                  }
+              } else {
+                  const quantityNeeded = remainingQty * bom.usagePerPiece * (1 + bom.wasteMargin);
+                  if (quantityNeeded > 0) {
+                      matSnapshot.push({
+                          name: mat.name,
+                          code: mat.code,
+                          unit: mat.unit,
+                          qty: quantityNeeded,
+                          color: 'Geral (Todas)', 
+                          type: mat.type,
+                          isVariant: false
+                      });
+                  }
               }
           });
       }
 
+      const tpObsIds = tp?.standardObservations || [];
+      const relevantObs = observations.filter(o => tpObsIds.includes(o.id));
+      
+      const obsSnapshot = relevantObs
+          .sort((a, b) => {
+              if (a.category === 'Costura' && b.category !== 'Costura') return -1;
+              if (a.category !== 'Costura' && b.category === 'Costura') return 1;
+              return 0;
+          })
+          .map(o => `• [${o.category?.toUpperCase() || 'GERAL'}] ${o.text}`)
+          .join('\n');
+
+      setTechPackSnapshot({ 
+          materials: matSnapshot, 
+          observations: obsSnapshot || "Nenhuma observação de costura/técnica registrada na Ficha Técnica." 
+      });
+      
+      setTargetPartner('');
+      setIsInternalProduction(false);
+      setSelectedOpForRemessa(op);
+  };
+
+  const handleConfirmRemessa = async () => {
+      if (!selectedOpForRemessa) return;
+      if (!isInternalProduction && !targetPartner) {
+          addToast({ type: 'warning', title: 'Atenção', message: 'Selecione uma Facção parceira.' });
+          return;
+      }
+
+      const totalCut = selectedOpForRemessa.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
+      const opOsfs = osfs.filter(osf => osf.opId === selectedOpForRemessa.id);
+      const totalSent = opOsfs.reduce((acc, osf) => acc + osf.sentQuantity, 0);
+      const quantityToSend = totalCut - totalSent;
+      
+      const ratio = totalCut > 0 ? quantityToSend / totalCut : 0;
+      
+      const itemsSnapshot = (selectedOpForRemessa.items || []).map(i => ({
+          color: i.color,
+          size: i.size,
+          quantity: Math.ceil(i.quantity * ratio)
+      })).filter(i => i.quantity > 0);
+
+      try {
+          const partnerId = isInternalProduction ? null : partners.find(p => p.name === targetPartner)?.id;
+
+          const newOsf = await ApiService.createSubcontractorOrder({
+              opId: selectedOpForRemessa.id,
+              partnerId: partnerId,
+              subcontractorName: isInternalProduction ? 'Produção Interna' : targetPartner,
+              type: isInternalProduction ? 'Interna' : 'Externa',
+              sentQuantity: quantityToSend,
+              itemsSnapshot: itemsSnapshot, // Saves the items sent
+              materialsSnapshot: techPackSnapshot.materials, // Saves the calculated materials (color-aware)
+              observations: techPackSnapshot.observations 
+          });
+          
+          await loadData();
+          setSelectedOpForRemessa(null);
+          setSelectedOsfForView(newOsf); 
+          addToast({ type: 'success', title: 'Remessa Gerada', message: 'Ficha de Produção criada com materiais separados por cor.' });
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      }
+  };
+
+  const handleOpenReturn = (osf: SubcontractorOrder) => {
+      const op = ops.find(o => o.id === osf.opId);
+      if (!op) return;
+
+      const itemsSource = (osf as any).itemsSnapshot || (osf as any).items_snapshot || [];
+      
+      const uniqueColors = Array.from(new Set((itemsSource as ReturnItem[]).map(i => i.color)));
+      const uniqueSizes = Array.from(new Set((itemsSource as ReturnItem[]).map(i => i.size))).sort();
+      setMatrixKeys({ colors: uniqueColors, sizes: uniqueSizes });
+
+      const grid: ReturnItem[] = itemsSource.map((i: any) => ({
+          color: i.color,
+          size: i.size,
+          quantity: 0,
+          type: 'approved'
+      }));
+
+      setReturnItems(grid);
+      setConferenteName('');
+      setConferenteError(false);
+      setSelectedOsfForReturn(osf);
+      setIsReturnModalOpen(true);
+  };
+
+  const updateMatrixValue = (color: string, size: string, value: number) => {
+      setReturnItems(prev => prev.map(item => 
+          item.color === color && item.size === size ? { ...item, quantity: value } : item
+      ));
+  };
+
+  const getReturnQty = (color: string, size: string) => {
+      return returnItems.find(i => i.color === color && i.size === size)?.quantity || 0;
+  };
+
+  const getSentQty = (color: string, size: string) => {
+      const source = (selectedOsfForReturn as any)?.itemsSnapshot || [];
+      return source.find((i:any) => i.color === color && i.size === size)?.quantity || 0;
+  };
+
+  const handleSaveReturn = async () => {
+      if (!selectedOsfForReturn) return;
+      if (!conferenteName.trim()) { 
+          setConferenteError(true);
+          addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Informe o nome do conferente.' });
+          return; 
+      }
+
+      const totalReturned = returnItems.reduce((a,b) => a + b.quantity, 0);
+      if (totalReturned === 0) {
+          if(!confirm("O retorno total é 0. Deseja salvar mesmo assim?")) return;
+      }
+
+      try {
+          await ApiService.registerReturn(selectedOsfForReturn.id, returnItems, conferenteName);
+          await loadData();
+          setIsReturnModalOpen(false);
+          addToast({ type: 'success', title: 'Retorno Registrado', message: 'Ordem atualizada com sucesso.' });
+      } catch (err: any) {
+          console.error(err);
+          addToast({ type: 'error', title: 'Erro ao Salvar', message: err.message });
+      }
+  };
+
+  // --- INTELLIGENT MATRIX RENDERER ---
+  const renderMatrixTable = (items: any[]) => {
+      if (!items || items.length === 0) return <p className="text-sm text-gray-500 italic">Nenhum item.</p>;
+
+      const sizes = Array.from(new Set(items.map(i => i.size))).sort();
+      const colors = Array.from(new Set(items.map(i => i.color))).sort();
+
       return (
-          <div className="w-[210mm] min-h-[297mm] bg-white p-12 mx-auto shadow-2xl printable-sheet text-gray-900 font-sans relative">
+          <div className="border border-gray-300 rounded overflow-hidden">
+              <table className="w-full text-center text-xs">
+                  <thead className="bg-gray-100 font-bold text-gray-800 uppercase">
+                      <tr>
+                          <th className="p-2 text-left w-32 border-r border-gray-300">Cor / Variante</th>
+                          {sizes.map(s => <th key={s} className="p-2 border-r border-gray-300">{s}</th>)}
+                          <th className="p-2 bg-gray-200 w-24">Total</th>
+                      </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                      {colors.map(color => {
+                          const rowTotal = items.filter(i => i.color === color).reduce((a,b) => a + b.quantity, 0);
+                          return (
+                              <tr key={color}>
+                                  <td className="p-2 text-left font-bold border-r border-gray-300 flex items-center gap-2">
+                                      <div className="w-3 h-3 rounded-full border border-gray-400" style={{backgroundColor: getColorStyle(color)}}></div>
+                                      {color}
+                                  </td>
+                                  {sizes.map(size => {
+                                      const qty = items.find(i => i.color === color && i.size === size)?.quantity || 0;
+                                      return (
+                                          <td key={size} className="p-2 border-r border-gray-300 text-gray-600">
+                                              {qty > 0 ? qty : '-'}
+                                          </td>
+                                      )
+                                  })}
+                                  <td className="p-2 font-bold bg-gray-50">{rowTotal}</td>
+                              </tr>
+                          );
+                      })}
+                      <tr className="bg-gray-100 font-bold border-t-2 border-gray-300">
+                          <td className="p-2 text-left">TOTAL GERAL</td>
+                          {sizes.map(s => (
+                              <td key={s} className="p-2 border-r border-gray-300 text-gray-700">
+                                  {items.filter(i => i.size === s).reduce((a,b)=>a+b.quantity, 0)}
+                              </td>
+                          ))}
+                          <td className="p-2 text-base text-black">
+                              {items.reduce((a,b)=>a+b.quantity,0)}
+                          </td>
+                      </tr>
+                  </tbody>
+              </table>
+          </div>
+      );
+  };
+
+  const renderPrintSheet = () => {
+      if (!selectedOsfForView) return null;
+      const op = ops.find(o => o.id === selectedOsfForView.opId);
+      const prod = products.find(p => p.id === op?.productId);
+      const osf = selectedOsfForView as any; 
+      
+      const subcontractorName = osf.subcontractorName || osf.partner_name || 'Desconhecido';
+      const partnerId = osf.partnerId || osf.partner_id;
+      const partnerDetails = partners.find(p => p.id === partnerId || p.name === subcontractorName);
+
+      const safeItems = osf.itemsSnapshot || osf.items_snapshot || [];
+      const safeMaterials = osf.materialsSnapshot || osf.materials_snapshot || [];
+
+      return (
+          <div className="bg-white p-8 w-[210mm] min-h-[297mm] mx-auto shadow-2xl printable-sheet text-gray-900 relative font-sans text-xs">
+              {/* HEADER */}
               <div className="flex justify-between items-start border-b-2 border-gray-800 pb-4 mb-6">
-                  <div className="flex gap-4">
-                      {prod?.imageUrl && (
-                          <img src={prod.imageUrl} className="w-24 h-24 object-cover border border-gray-200 rounded"/>
-                      )}
-                      <div>
-                          <h1 className="text-2xl font-bold uppercase tracking-wide mb-1">Ficha de Produção / Remessa</h1>
-                          <div className="text-xs font-bold text-gray-500 uppercase">Ordem de Serviço de Facção (OSF)</div>
-                          <div className="mt-2 text-4xl font-mono font-bold text-gray-900">{selectedOsfForPrint.id}</div>
-                      </div>
+                  <div className="flex flex-col">
+                      <h1 className="text-2xl font-extrabold uppercase tracking-tight text-gray-900">
+                          {osf.type === 'Retrabalho' ? 'Ficha de Conserto (Retrabalho)' : 'Ficha de Produção'}
+                      </h1>
+                      <div className="text-gray-500 font-bold uppercase mt-1">OSF #{osf.id.split('-')[0]}</div>
                   </div>
                   <div className="text-right">
-                      <div className="text-sm font-bold">Data Emissão: {new Date(selectedOsfForPrint.sentDate).toLocaleDateString()}</div>
-                      <div className="text-xs text-gray-500 mt-1">Lote OP: {op?.lotNumber}</div>
+                      <div className="font-bold text-lg text-gray-800">{profile?.company_name || "Confecção"}</div>
+                      <div className="text-gray-500">{new Date().toLocaleDateString()}</div>
                   </div>
               </div>
-              <div className="grid grid-cols-2 gap-6 mb-6">
-                  <div className="border border-gray-300 rounded p-3 bg-gray-50">
-                      <h3 className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-1"><Truck size={12}/> Destinatário (Facção)</h3>
-                      <div className="text-lg font-bold mb-1">{selectedOsfForPrint.subcontractorName}</div>
-                      <div className="text-sm text-gray-600">{partner?.address || 'Endereço não cadastrado'}</div>
-                      <div className="text-sm text-gray-600 flex gap-4 mt-1">
-                          <span>Tel: {partner?.phone || '-'}</span>
-                          <span>CNPJ: {partner?.cnpj || '-'}</span>
+
+              <div className="grid grid-cols-2 gap-8 mb-6 border border-gray-300 rounded-lg overflow-hidden">
+                  <div className="p-4 border-r border-gray-300 bg-gray-50">
+                      <h3 className="font-bold text-gray-500 uppercase mb-2 flex items-center gap-2"><Building2 size={14}/> Remetente</h3>
+                      <div className="text-sm font-bold text-gray-800">{profile?.company_name}</div>
+                      <div className="text-gray-600 mt-1">{profile?.phone}</div>
+                  </div>
+                  <div className="p-4 bg-white">
+                      <h3 className="font-bold text-gray-500 uppercase mb-2 flex items-center gap-2"><User size={14}/> Facção / Destino</h3>
+                      <div className="text-sm font-bold text-gray-800">{subcontractorName}</div>
+                      <div className="text-gray-600 mt-1">{partnerDetails?.phone}</div>
+                  </div>
+              </div>
+
+              <div className="flex gap-6 mb-6">
+                  {prod?.imageUrl && (
+                      <div className="w-24 h-24 border border-gray-300 rounded-lg overflow-hidden shrink-0">
+                          <img src={prod.imageUrl} className="w-full h-full object-cover"/>
                       </div>
-                  </div>
-                  <div className="border border-gray-300 rounded p-3">
-                      <h3 className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-1"><FileBox size={12}/> Produto</h3>
-                      <div className="text-lg font-bold mb-1">{prod?.sku}</div>
-                      <div className="text-sm text-gray-700">{prod?.name}</div>
-                      <div className="text-sm text-gray-500 mt-1">Coleção: {prod?.collection}</div>
+                  )}
+                  <div className="flex-1 grid grid-cols-2 gap-y-2 content-start">
+                      <div><span className="font-bold text-gray-500">Produto:</span> <span className="font-bold text-base ml-2">{prod?.name}</span></div>
+                      <div><span className="font-bold text-gray-500">SKU:</span> <span className="font-bold ml-2">{prod?.sku}</span></div>
+                      <div><span className="font-bold text-gray-500">OP Lote:</span> <span className="bg-gray-100 px-2 rounded font-mono font-bold ml-2">{op?.lotNumber}</span></div>
+                      <div><span className="font-bold text-gray-500">Qtd Total:</span> <span className="font-bold ml-2">{osf.sentQuantity} pçs</span></div>
                   </div>
               </div>
-              <div className="mb-6">
-                  <h3 className="text-sm font-bold text-gray-800 uppercase mb-2 border-b border-gray-300 pb-1">Grade de Envio (Cores x Tamanhos)</h3>
-                  <table className="w-full text-center border-collapse border border-gray-300 text-sm">
-                      <thead className="bg-gray-200 font-bold">
-                          <tr>
-                              <th className="border border-gray-300 p-2 text-left">Cor</th>
-                              {sizes.map(s => <th key={s} className="border border-gray-300 p-2 w-16">{s}</th>)}
-                              <th className="border border-gray-300 p-2 w-20 bg-gray-300">Total</th>
-                          </tr>
-                      </thead>
-                      <tbody>
-                          {colors.map(c => {
-                              const rowTotal = items.filter(i => i.color === c).reduce((a,b) => a + b.quantity, 0);
-                              return (
-                                  <tr key={c}>
-                                      <td className="border border-gray-300 p-2 text-left font-bold">{c}</td>
-                                      {sizes.map(s => {
-                                          const qty = items.find(i => i.color === c && i.size === s)?.quantity;
-                                          return <td key={s} className="border border-gray-300 p-2">{qty || '-'}</td>;
-                                      })}
-                                      <td className="border border-gray-300 p-2 font-bold bg-gray-100">{rowTotal}</td>
-                                  </tr>
-                              );
-                          })}
-                          <tr className="bg-gray-100 font-bold">
-                              <td className="border border-gray-300 p-2 text-left">TOTAIS</td>
-                              {sizes.map(s => (
-                                  <td key={s} className="border border-gray-300 p-2">{items.filter(i => i.size === s).reduce((a,b)=>a+b.quantity,0)}</td>
-                              ))}
-                              <td className="border border-gray-300 p-2 text-lg">{selectedOsfForPrint.sentQuantity}</td>
-                          </tr>
-                      </tbody>
-                  </table>
+
+              {/* MATRIX GRADE (NEW) */}
+              <div className="mb-8">
+                  <h3 className="font-bold text-gray-800 border-b-2 border-gray-800 mb-2 pb-1 flex items-center gap-2 uppercase">
+                      <LayoutList size={14}/> Grade de Envio (Matriz)
+                  </h3>
+                  {renderMatrixTable(safeItems)}
               </div>
+
+              {/* MATERIALS (COLOR AWARE) */}
               <div className="mb-6">
-                  <h3 className="text-sm font-bold text-gray-800 uppercase mb-2 border-b border-gray-300 pb-1">Insumos e Matéria Prima Enviada</h3>
-                  <table className="w-full text-sm border border-gray-300">
-                      <thead className="bg-gray-100 font-bold text-left">
+                  <h3 className="font-bold text-gray-800 border-b-2 border-gray-800 mb-2 pb-1 flex items-center gap-2 uppercase">
+                      <Factory size={14}/> Aviamentos & Insumos Enviados
+                  </h3>
+                  <table className="w-full text-left border border-gray-300">
+                      <thead className="bg-gray-100 font-bold text-gray-700">
                           <tr>
-                              <th className="p-2 border-b border-r">Insumo / Material</th>
-                              <th className="p-2 border-b border-r w-32 text-center">Cor / Var.</th>
-                              <th className="p-2 border-b w-32 text-right">Qtd Enviada</th>
-                              <th className="p-2 border-b w-24 text-center">Conf.</th>
+                              <th className="p-2 border-r w-5/12">Material / Componente</th>
+                              <th className="p-2 border-r w-3/12">Variante / Aplicação</th>
+                              <th className="p-2 border-r w-2/12 text-center">Qtd. Enviada</th>
+                              <th className="p-2 text-center w-2/12">Conf.</th>
                           </tr>
                       </thead>
-                      <tbody>
-                          {calculatedMaterials.map((mat, idx) => (
-                              <tr key={idx} className="border-b">
-                                  <td className="p-2 border-r font-medium">{mat.name}</td>
-                                  <td className="p-2 border-r text-center text-xs uppercase text-gray-600">{mat.color}</td>
-                                  <td className="p-2 border-r text-right font-bold">{mat.qty.toFixed(2)} {mat.unit}</td>
-                                  <td className="p-2 text-center text-gray-300">___</td>
+                      <tbody className="divide-y divide-gray-200">
+                          {safeMaterials.slice().sort((a: any, b: any) => (a.color || '').localeCompare(b.color || '')).map((mat: any, idx: number) => (
+                              <tr key={idx} className={mat.isVariant ? 'bg-blue-50/30' : ''}>
+                                  <td className="p-2 border-r">
+                                      <div className="font-bold text-gray-800">{mat.name}</div>
+                                      <div className="text-[10px] text-gray-500 font-mono">{mat.code}</div>
+                                  </td>
+                                  <td className="p-2 border-r">
+                                      {mat.isVariant ? (
+                                          <div className="flex items-center gap-2">
+                                              <div className="w-3 h-3 rounded-full border border-gray-300" style={{backgroundColor: getColorStyle(mat.color)}}></div>
+                                              <span className="font-bold text-blue-800 uppercase text-[10px]">{mat.color}</span>
+                                          </div>
+                                      ) : (
+                                          <span className="text-[10px] text-gray-500 italic">Geral (Todas)</span>
+                                      )}
+                                  </td>
+                                  <td className="p-2 border-r text-center font-bold">
+                                      {(mat.qty || 0).toFixed(2)} {mat.unit}
+                                  </td>
+                                  <td className="p-2 text-center"><div className="w-4 h-4 border border-gray-400 rounded mx-auto"></div></td>
                               </tr>
                           ))}
-                          {calculatedMaterials.length === 0 && <tr><td colSpan={4} className="p-2 text-center italic">Nenhum insumo cadastrado na ficha técnica.</td></tr>}
                       </tbody>
                   </table>
               </div>
-              <div className="mb-8 border border-gray-300 rounded min-h-[100px] p-2 relative">
-                  <div className="absolute top-0 left-0 bg-gray-100 px-2 py-1 text-xs font-bold uppercase border-b border-r rounded-br">Observações & Logs</div>
-                  <div className="mt-6 text-xs font-mono whitespace-pre-wrap text-gray-700">
-                      {selectedOsfForPrint.observations || 'Nenhuma observação registrada.'}
+
+              {/* OBSERVATIONS */}
+              <div className="mb-8 border-2 border-gray-200 rounded-lg p-4 bg-yellow-50/20">
+                  <h3 className="font-bold text-gray-800 uppercase mb-2 flex items-center gap-2 text-xs">
+                      <AlertTriangle size={14} className="text-orange-500"/> Observações Técnicas
+                  </h3>
+                  <div className="text-sm whitespace-pre-line text-gray-700 leading-relaxed min-h-[60px]">
+                      {osf.observations || "• Seguir rigorosamente a ficha técnica."}
                   </div>
               </div>
-              <div className="mt-12 pt-4 border-t-2 border-dashed border-gray-400 grid grid-cols-2 gap-20">
-                  <div className="text-center">
-                      <div className="border-b border-gray-400 h-8 mb-2"></div>
-                      <div className="text-xs uppercase font-bold text-gray-500">Assinatura Expedição (Interno)</div>
+
+              <div className="mt-auto pt-12 pb-4">
+                  <div className="grid grid-cols-2 gap-20">
+                      <div className="text-center"><div className="border-b border-black h-8 mb-2"></div><div className="text-xs uppercase font-bold text-gray-800">Expedição Interna</div></div>
+                      <div className="text-center"><div className="border-b border-black h-8 mb-2"></div><div className="text-xs uppercase font-bold text-gray-800">Recebido por</div></div>
                   </div>
-                  <div className="text-center">
-                      <div className="border-b border-gray-400 h-8 mb-2"></div>
-                      <div className="text-xs uppercase font-bold text-gray-500">Assinatura Recebedor ({selectedOsfForPrint.subcontractorName})</div>
-                  </div>
-              </div>
-              <div className="absolute bottom-4 left-0 w-full text-center text-[10px] text-gray-400">
-                  Sistema B-Hub PCP • Documento gerado em {new Date().toLocaleString()}
               </div>
           </div>
       );
   };
 
   return (
-    <div className="space-y-6" onClick={() => setActiveMenuOsfId(null)}>
-      {/* HEADER */}
-      <div className="flex flex-col gap-4 no-print">
-        <div className="flex justify-between items-center">
+    <div className="space-y-6">
+        {/* HEADER & CARDS (SAME AS BEFORE) */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 no-print">
             <div>
-            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <Truck className="text-indigo-600" /> Facções & Terceirização
-            </h1>
-            <p className="text-gray-500 text-sm">Controle de envio e retorno de oficinas externas.</p>
+                <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2"><Truck className="text-indigo-600" /> Facções & Terceirização</h1>
+                <p className="text-gray-500 text-sm">Controle de remessas e retorno.</p>
             </div>
         </div>
 
-        {/* STATUS SUMMARY CARDS (NEW) */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-            <div 
-                onClick={() => setCardFilter('')}
-                className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-gray-500 ${cardFilter === '' ? 'ring-2 ring-gray-500' : ''}`}
-            >
-                <div className="flex justify-between items-start mb-2">
-                    <div className="p-2 bg-gray-100 text-gray-600 rounded-lg"><LayoutList size={20}/></div>
-                    <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">{osfStats.total}</span>
-                </div>
-                <div className="text-gray-500 text-xs font-bold uppercase">Todos (Histórico)</div>
-            </div>
-
-            <div 
-                onClick={() => setCardFilter('AguardandoEnvio')}
-                className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-orange-500 ${cardFilter === 'AguardandoEnvio' ? 'ring-2 ring-orange-500' : ''}`}
-            >
-                <div className="flex justify-between items-start mb-2">
-                    <div className="p-2 bg-orange-50 text-orange-600 rounded-lg"><Scissors size={20}/></div>
-                    <span className="text-xs font-bold text-orange-600 bg-orange-50 px-2 py-1 rounded-full">{osfStats.awaiting}</span>
-                </div>
-                <div className="text-gray-500 text-xs font-bold uppercase">Cortado (Aguardando)</div>
-            </div>
-
-            <div 
-                onClick={() => setCardFilter('Enviado')}
-                className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-blue-500 ${cardFilter === 'Enviado' ? 'ring-2 ring-blue-500' : ''}`}
-            >
-                <div className="flex justify-between items-start mb-2">
-                    <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><Truck size={20}/></div>
-                    <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-full">{osfStats.sent}</span>
-                </div>
-                <div className="text-gray-500 text-xs font-bold uppercase">Na Rua (Enviado)</div>
-            </div>
-
-            <div 
-                onClick={() => setCardFilter('Parcial')}
-                className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-yellow-500 ${cardFilter === 'Parcial' ? 'ring-2 ring-yellow-500' : ''}`}
-            >
-                <div className="flex justify-between items-start mb-2">
-                    <div className="p-2 bg-yellow-50 text-yellow-600 rounded-lg"><Clock size={20}/></div>
-                    <span className="text-xs font-bold text-yellow-600 bg-yellow-50 px-2 py-1 rounded-full">{osfStats.partial}</span>
-                </div>
-                <div className="text-gray-500 text-xs font-bold uppercase">Parcial (Retornando)</div>
-            </div>
-
-            <div 
-                onClick={() => setCardFilter('Concluido')}
-                className={`bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md border-green-500 ${cardFilter === 'Concluido' ? 'ring-2 ring-green-500' : ''}`}
-            >
-                <div className="flex justify-between items-start mb-2">
-                    <div className="p-2 bg-green-50 text-green-600 rounded-lg"><CheckCircle2 size={20}/></div>
-                    <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">{osfStats.completed}</span>
-                </div>
-                <div className="text-gray-500 text-xs font-bold uppercase">Concluídos</div>
-            </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 no-print">
+            {/* Same Cards as previous implementation */}
+            <div onClick={() => setCardFilter('')} className="bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer border-gray-500"><div className="text-xs font-bold text-gray-600">Total Histórico</div><div className="font-bold text-lg">{stats.total}</div></div>
+            <div onClick={() => setCardFilter('awaiting')} className="bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer border-orange-500"><div className="text-xs font-bold text-orange-600">Aguardando Envio</div><div className="font-bold text-lg">{stats.awaiting}</div></div>
+            <div onClick={() => setCardFilter('sent')} className="bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer border-blue-500"><div className="text-xs font-bold text-blue-600">Na Rua (Enviado)</div><div className="font-bold text-lg">{stats.sent}</div></div>
+            <div onClick={() => setCardFilter('partial')} className="bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer border-yellow-500"><div className="text-xs font-bold text-yellow-600">Retorno Parcial</div><div className="font-bold text-lg">{stats.partial}</div></div>
+            <div onClick={() => setCardFilter('completed')} className="bg-white p-4 rounded-xl border-l-4 shadow-sm cursor-pointer border-green-500"><div className="text-xs font-bold text-green-600">Concluídos</div><div className="font-bold text-lg">{stats.completed}</div></div>
         </div>
 
-        {/* MODERN FILTER BAR */}
-        <div className="bg-white p-4 rounded-xl border shadow-sm flex flex-col md:flex-row gap-4 items-center justify-between">
-            <div className="flex gap-4 flex-1 items-center">
-                <ModernDatePicker 
-                    startDate={dateRange.start}
-                    endDate={dateRange.end}
-                    label={dateRange.label}
-                    onChange={(range) => setDateRange({
-                        label: range.label || 'Personalizado',
-                        days: 'custom',
-                        start: range.start,
-                        end: range.end
-                    })}
-                />
-
-                <div className="relative flex-1 max-w-md">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18}/>
-                    <input 
-                        type="text" 
-                        placeholder="Buscar Lote, Produto ou Facção..."
-                        className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
-                        value={filters.search}
-                        onChange={e => setFilters({...filters, search: e.target.value})}
-                    />
-                </div>
-            </div>
-
-            <div className="flex gap-2">
-                <select 
-                    className="border rounded-lg p-2 bg-white focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
-                    value={filters.type}
-                    onChange={e => setFilters({...filters, type: e.target.value})}
-                >
-                    <option value="ALL">Todos os Tipos</option>
-                    <option value="EXTERNAL">Produção Externa</option>
-                    <option value="INTERNAL">Produção Interna</option>
-                </select>
-                
-                {(filters.search || filters.type !== 'ALL' || filters.partnerId || cardFilter) && (
-                    <button 
-                        onClick={() => { setFilters({ search: '', type: 'ALL', partnerId: '' }); setCardFilter(''); }}
-                        className="p-2 text-red-500 hover:bg-red-50 rounded-lg"
-                        title="Limpar Filtros"
-                    >
-                        <X size={20}/>
-                    </button>
-                )}
-            </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 no-print animate-fade-in">
-        {/* Section 1: Ready to Ship */}
-        {(!cardFilter || cardFilter === 'AguardandoEnvio') && (
-            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-            <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                <AlertTriangle size={20} className="text-orange-500"/> Cortadas - Aguardando Envio ({filteredCutOps.length})
-            </h3>
-            <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                <thead className="bg-gray-50 text-gray-600">
-                    <tr>
-                    <th className="p-3">Data Corte</th>
-                    <th className="p-3">OP #</th>
-                    <th className="p-3">Produto</th>
-                    <th className="p-3">Qtd</th>
-                    <th className="p-3">Facção Prevista</th>
-                    <th className="p-3 text-right">Ação</th>
-                    </tr>
-                </thead>
-                <tbody className="divide-y">
-                    {filteredCutOps.map(op => {
-                        const prod = products.find(p => p.id === op.productId);
-                        return (
-                        <tr key={op.id}>
-                            <td className="p-3 text-gray-500">{new Date(op.createdAt).toLocaleDateString()}</td>
-                            <td className="p-3 font-mono font-bold">{op.lotNumber}</td>
-                            <td className="p-3">
-                                <div className="font-bold text-gray-900">{prod?.sku} - {prod?.name}</div>
-                            </td>
-                            <td className="p-3 font-bold">{op.quantityTotal}</td>
-                            <td className="p-3 text-indigo-600 font-medium">{op.subcontractor}</td>
-                            <td className="p-3 text-right">
-                            <button 
-                                onClick={() => openPrintModal(op)}
-                                className="bg-indigo-600 text-white px-3 py-1.5 rounded hover:bg-indigo-700 text-xs font-bold flex items-center gap-1 ml-auto"
-                            >
-                                Gerar Remessa <ArrowRight size={12}/>
-                            </button>
-                            </td>
-                        </tr>
-                        );
-                    })}
-                    {filteredCutOps.length === 0 && (
-                    <tr>
-                        <td colSpan={6} className="p-8 text-center text-gray-400 italic">
-                            Nenhuma OP aguardando envio com os filtros atuais.
-                        </td>
-                    </tr>
-                    )}
-                </tbody>
-                </table>
-            </div>
-            </div>
-        )}
-
-        {/* Section 2: Active OSFs */}
-        {cardFilter !== 'AguardandoEnvio' && (
-        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-          <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-             <CheckCircle2 size={20} className="text-green-500"/> Em Produção Externa - OSF ({filteredActiveOsfs.length})
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-             {filteredActiveOsfs.map(osf => {
-               const op = ops.find(o => o.id === osf.opId);
-               const prod = products.find(p => p.id === op?.productId);
-               return (
-               <div key={osf.id} className="border rounded-lg p-4 hover:border-indigo-300 transition-colors bg-white relative group">
-                  {osf.parentId && <div className="absolute top-2 right-2 text-[10px] bg-purple-100 text-purple-700 px-2 rounded">Saldo {osf.parentId}</div>}
-                  
-                  {/* 3 Dots Menu */}
-                  <div className="absolute top-2 right-2">
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); setActiveMenuOsfId(activeMenuOsfId === osf.id ? null : osf.id); }}
-                        className="p-1 hover:bg-gray-100 rounded-full text-gray-400"
-                      >
-                          <MoreVertical size={16}/>
-                      </button>
-                      {activeMenuOsfId === osf.id && (
-                          <div className="absolute right-0 top-6 bg-white shadow-xl border rounded-lg z-10 w-40 overflow-hidden animate-fade-in">
-                              <button 
-                                onClick={() => handleCopyLink(osf)}
-                                className="w-full text-left px-4 py-2 text-sm hover:bg-blue-50 text-blue-600 flex items-center gap-2"
-                              >
-                                <Share2 size={14}/> Link do Parceiro
-                              </button>
-                              <button 
-                                onClick={(e) => { e.stopPropagation(); handleReverseShipment(osf); }}
-                                className="w-full text-left px-4 py-2 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2"
-                                disabled={osf.receivedQuantity > 0}
-                              >
-                                <RotateCcw size={14}/> Estornar Remessa
-                              </button>
-                          </div>
-                      )}
-                  </div>
-
-                  <div className="flex justify-between mb-2">
-                    <span className="font-bold text-indigo-700">{osf.id}</span>
-                    <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full uppercase mr-6">{osf.status}</span>
-                  </div>
-                  
-                  {/* Product Info inside Card */}
-                  <div className="mb-3 pb-3 border-b border-gray-100">
-                      <div className="font-bold text-gray-800 text-sm">{prod?.name}</div>
-                      <div className="text-xs text-gray-500">{prod?.sku}</div>
-                  </div>
-
-                  <div className="text-sm text-gray-600 mb-1">OP Vinculada: <b>{osf.opId}</b></div>
-                  <div className="text-sm text-gray-600 mb-3">Oficina: {osf.subcontractorName}</div>
-                  
-                  <div className="bg-gray-50 p-2 rounded text-xs grid grid-cols-2 gap-2 mb-3">
-                    <div>Enviado: <br/><span className="font-bold text-base">{osf.sentQuantity}</span></div>
-                    <div>Recebido: <br/><span className="font-bold text-base text-gray-400">{osf.receivedQuantity}</span></div>
-                  </div>
-                  <div className="text-xs text-gray-400 mb-2">Enviado em: {new Date(osf.sentDate).toLocaleDateString()}</div>
-
-                  <div className="flex gap-2">
-                      <button onClick={() => openOsfPrintModal(osf)} className="flex-1 py-2 border border-gray-300 text-gray-600 font-medium rounded hover:bg-gray-50 text-sm flex justify-center items-center gap-1">
-                        <FileText size={14}/> 2a Via
-                      </button>
-                      <button onClick={() => openReturnModal(osf)} className="flex-1 py-2 bg-green-600 text-white font-medium rounded hover:bg-green-700 text-sm flex justify-center items-center gap-1">
-                        <Undo2 size={14}/> Retorno
-                      </button>
-                  </div>
-               </div>
-             );
-             })}
-             {filteredActiveOsfs.length === 0 && <div className="text-gray-400 text-sm col-span-3 text-center py-8 italic">Nenhuma ordem encontrada com os filtros selecionados.</div>}
-          </div>
-        </div>
-        )}
-
-        {/* Section 3: History (Completed) */}
-        {( !cardFilter || cardFilter === 'Concluido' ) && (
-            <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
-                <h3 className="text-lg font-bold text-gray-700 mb-4 flex items-center gap-2">
-                    <History size={20}/> Histórico de Facções (Concluídos: {filteredCompletedOsfs.length})
-                </h3>
-                <div className="overflow-x-auto bg-white rounded-lg border">
+        {/* LISTS */}
+        <div className="grid grid-cols-1 gap-6 no-print">
+            {/* 1. READY TO SHIP */}
+            {(!cardFilter || cardFilter === 'awaiting') && (
+                <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="p-4 border-b bg-orange-50 flex justify-between items-center">
+                        <h3 className="font-bold text-orange-800 flex items-center gap-2"><Scissors size={18}/> Cortes Disponíveis</h3>
+                    </div>
                     <table className="w-full text-sm text-left">
-                        <thead className="bg-gray-100 text-gray-600">
-                            <tr>
-                                <th className="p-3">Data Envio</th>
-                                <th className="p-3">OSF</th>
-                                <th className="p-3">OP</th>
-                                <th className="p-3">Facção</th>
-                                <th className="p-3 text-right">Enviado</th>
-                                <th className="p-3 text-right">Retornado</th>
-                                <th className="p-3">Data Retorno</th>
-                                <th className="p-3 text-center">Ação</th>
-                            </tr>
+                        <thead className="bg-orange-100 text-orange-900 font-bold">
+                            <tr><th className="p-3">Data</th><th className="p-3">Lote</th><th className="p-3">Produto</th><th className="p-3">Qtd</th><th className="p-3 text-right">Ação</th></tr>
                         </thead>
-                        <tbody className="divide-y">
-                            {filteredCompletedOsfs.map(osf => (
-                                <tr key={osf.id} className="hover:bg-gray-50">
-                                    <td className="p-3 text-gray-500">{new Date(osf.sentDate).toLocaleDateString()}</td>
-                                    <td className="p-3 font-mono text-gray-600">{osf.id}</td>
-                                    <td className="p-3 font-bold">{osf.opId}</td>
-                                    <td className="p-3">{osf.subcontractorName}</td>
-                                    <td className="p-3 text-right">{osf.sentQuantity}</td>
-                                    <td className="p-3 text-right font-bold text-green-700">{osf.receivedQuantity}</td>
-                                    <td className="p-3 text-gray-500">{new Date(osf.returnDate || '').toLocaleDateString()}</td>
-                                    <td className="p-3 text-center">
-                                        <button onClick={() => openOsfPrintModal(osf)} className="text-blue-600 hover:underline">Ver Ficha</button>
+                        <tbody className="divide-y divide-orange-100">
+                            {readyToShipOps.map(op => (
+                                <tr key={op.id} className="hover:bg-orange-50/50">
+                                    <td className="p-3 text-gray-500">{new Date(op.createdAt).toLocaleDateString()}</td>
+                                    <td className="p-3 font-mono font-bold text-gray-800">{op.lotNumber}</td>
+                                    <td className="p-3">{getProductDisplayName(op.productId)}</td>
+                                    <td className="p-3 font-bold">{op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0)}</td>
+                                    <td className="p-3 text-right">
+                                        <button onClick={() => handleOpenRemessa(op)} className="bg-orange-600 text-white px-3 py-1.5 rounded hover:bg-orange-700 font-bold text-xs flex items-center gap-1 ml-auto shadow-sm">
+                                            Gerar Remessa <ArrowRight size={14}/>
+                                        </button>
                                     </td>
                                 </tr>
                             ))}
-                            {filteredCompletedOsfs.length === 0 && <tr><td colSpan={8} className="p-4 text-center text-gray-400 italic">Nenhum histórico encontrado com os filtros selecionados.</td></tr>}
                         </tbody>
                     </table>
                 </div>
+            )}
+
+            {/* 2. ACTIVE ORDERS */}
+            {(!cardFilter || ['sent', 'partial'].includes(cardFilter)) && (
+                <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="p-4 border-b bg-blue-50 flex justify-between items-center"><h3 className="font-bold text-blue-800">Em Produção</h3></div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-gray-50">
+                        {activeOsfs.map(osf => {
+                            const isRework = osf.type === 'Retrabalho';
+                            return (
+                                <div key={osf.id} className={`bg-white border rounded-xl p-4 shadow-sm hover:shadow-md transition-all ${isRework ? 'border-l-4 border-l-red-500' : ''}`}>
+                                    <div className="flex justify-between mb-2">
+                                        <span className={`font-bold text-xs px-2 py-1 rounded border ${isRework ? 'bg-red-50 text-red-700 border-red-100' : 'bg-blue-50 text-blue-700 border-blue-100'}`}>
+                                            {osf.type}
+                                        </span>
+                                        <span className={`text-xs font-bold px-2 py-1 rounded ${osf.status === 'Parcial' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{osf.status}</span>
+                                    </div>
+                                    <h4 className="font-bold text-gray-800 mb-1">{osf.subcontractorName}</h4>
+                                    <div className="text-xs text-gray-500 mb-3">{getProductDisplayName(ops.find(o => o.id === osf.opId)?.productId || '')}</div>
+                                    <div className="flex justify-between items-end border-t pt-3 mt-2">
+                                        <div><div className="text-xs text-gray-400 font-bold uppercase">Enviado</div><div className="font-bold text-lg">{osf.sentQuantity}</div></div>
+                                        <div className="text-right"><div className="text-xs text-gray-400 font-bold uppercase">Recebido</div><div className="font-bold text-lg text-green-600">{osf.receivedQuantity}</div></div>
+                                    </div>
+                                    <div className="flex gap-2 mt-4">
+                                        <button onClick={() => setSelectedOsfForView(osf)} className="flex-1 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-50">Ficha</button>
+                                        <button onClick={() => handleOpenReturn(osf)} className="flex-1 py-2 bg-green-600 text-white rounded text-xs font-bold hover:bg-green-700 shadow-sm flex items-center justify-center gap-1"><Undo2 size={12}/> Receber</button>
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {/* 3. COMPLETED ORDERS (FIXED) */}
+            {cardFilter === 'completed' && (
+                <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="p-4 border-b bg-green-50 flex justify-between items-center">
+                        <h3 className="font-bold text-green-800 flex items-center gap-2"><CheckCircle2 size={18}/> Histórico de Concluídos</h3>
+                    </div>
+                    <table className="w-full text-sm text-left">
+                        <thead className="bg-green-100 text-green-900 font-bold">
+                            <tr><th className="p-3">Data Retorno</th><th className="p-3">Facção</th><th className="p-3">Produto</th><th className="p-3 text-center">Enviado</th><th className="p-3 text-center">Recebido</th><th className="p-3 text-right">Ação</th></tr>
+                        </thead>
+                        <tbody className="divide-y divide-green-100">
+                            {historyOsfs.map(osf => {
+                                return (
+                                    <tr key={osf.id} className="hover:bg-green-50/50">
+                                        <td className="p-3 text-gray-500">{osf.returnDate ? new Date(osf.returnDate).toLocaleDateString() : '-'}</td>
+                                        <td className="p-3 font-bold text-gray-700">{osf.subcontractorName}</td>
+                                        <td className="p-3 text-gray-600">{getProductDisplayName(ops.find(o => o.id === osf.opId)?.productId || '')}</td>
+                                        <td className="p-3 text-center">{osf.sentQuantity}</td>
+                                        <td className="p-3 text-center font-bold text-green-700">{osf.receivedQuantity}</td>
+                                        <td className="p-3 text-right">
+                                            <button onClick={() => setSelectedOsfForView(osf)} className="text-blue-600 hover:underline text-xs font-bold flex items-center gap-1 justify-end">
+                                                <Eye size={14}/> Ver Ficha
+                                            </button>
+                                        </td>
+                                    </tr>
+                                )
+                            })}
+                            {historyOsfs.length === 0 && (
+                                <tr><td colSpan={6} className="p-8 text-center text-gray-400 italic">Nenhum histórico encontrado.</td></tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+
+        {/* MODALS */}
+        {selectedOpForRemessa && (
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-in">
+                    <div className="bg-indigo-600 p-4 text-white flex justify-between items-center">
+                        <h3 className="font-bold flex items-center gap-2"><Truck/> Nova Remessa</h3>
+                        <button onClick={() => setSelectedOpForRemessa(null)}><X/></button>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        <div className="bg-yellow-50 p-3 rounded border border-yellow-200 text-xs text-yellow-800">
+                            <span className="font-bold">Automático:</span> Os insumos serão calculados e separados por cor baseados na Ficha Técnica.
+                        </div>
+                        <label className="flex items-center gap-2 p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                            <input type="checkbox" className="w-5 h-5" checked={isInternalProduction} onChange={e => setIsInternalProduction(e.target.checked)}/>
+                            <span className="font-bold text-gray-700">Produção Interna?</span>
+                        </label>
+                        {!isInternalProduction && (
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Selecione a Facção <span className="text-red-500">*</span></label>
+                                <select className="w-full border p-3 rounded-lg bg-white" value={targetPartner} onChange={e => setTargetPartner(e.target.value)}>
+                                    <option value="">Selecione...</option>
+                                    {partners.filter(p => p.type === 'Facção' || p.type === 'Outro').map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                                </select>
+                            </div>
+                        )}
+                        <button onClick={handleConfirmRemessa} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 shadow-lg">Confirmar Envio</button>
+                    </div>
+                </div>
             </div>
         )}
-      </div>
 
-      {/* NEW SHIPMENT CONFIRMATION MODAL */}
-      {selectedOpForPrint && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-in">
-                <div className="bg-indigo-600 p-4 text-white flex justify-between items-center">
-                    <h3 className="font-bold text-lg flex items-center gap-2"><Truck/> Confirmar Envio</h3>
-                    <button onClick={() => setSelectedOpForPrint(null)}><X/></button>
+        {selectedOsfForView && (
+            <div className="fixed inset-0 bg-gray-600/90 z-[60] flex justify-center overflow-y-auto">
+                <div className="relative my-8 animate-fade-in">
+                    <div className="absolute -top-10 right-0 flex gap-2 no-print">
+                        <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2"><Printer size={18}/> Imprimir</button>
+                        <button onClick={() => setSelectedOsfForView(null)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded shadow font-bold hover:bg-gray-300 flex items-center gap-2"><X size={18}/> Fechar</button>
+                    </div>
+                    {renderPrintSheet()}
                 </div>
-                <div className="p-6">
-                    <div className="mb-6 text-center">
-                        <div className="text-gray-500 text-sm uppercase font-bold">OP Destino</div>
-                        <div className="text-3xl font-bold text-indigo-600">{selectedOpForPrint.lotNumber}</div>
-                        <div className="text-gray-600 mt-2 mb-4">
-                            Enviar <b>{selectedOpForPrint.quantityTotal}</b> peças.
-                        </div>
+            </div>
+        )}
+
+        {/* RETURN MODAL - REFACTORED TO MATRIX */}
+        {isReturnModalOpen && selectedOsfForReturn && (
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden animate-scale-in flex flex-col max-h-[90vh]">
+                    <div className="bg-green-600 p-4 text-white flex justify-between items-center shrink-0">
+                        <h3 className="font-bold flex items-center gap-2 text-lg"><Undo2/> Conferência de Retorno (Facção)</h3>
+                        <button onClick={() => setIsReturnModalOpen(false)}><X/></button>
+                    </div>
+                    
+                    <div className="p-6 overflow-y-auto">
                         
-                        {/* MANDATORY PARTNER SELECTION */}
-                        <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-left">
-                            <label className="block text-sm font-bold text-gray-700 mb-2">Selecione a Facção Responsável <span className="text-red-500">*</span></label>
-                            <select 
-                                className="w-full border-2 border-indigo-100 rounded-lg p-3 bg-white focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-gray-800"
-                                value={targetPartner}
-                                onChange={e => setTargetPartner(e.target.value)}
-                            >
-                                <option value="">-- Selecione o Parceiro --</option>
-                                <optgroup label="Facções">
-                                    {partners.filter(p => p.type === 'Facção' || p.type === 'Outro').map(p => (
-                                        <option key={p.id} value={p.name}>{p.name}</option>
-                                    ))}
-                                </optgroup>
-                                <option value="Produção Interna">Produção Interna</option>
-                            </select>
-                            {(!targetPartner) && <p className="text-xs text-red-500 mt-1 font-medium">Obrigatório selecionar.</p>}
+                        {/* Summary Cards */}
+                        <div className="grid grid-cols-2 gap-4 mb-6">
+                            <div className="bg-gray-50 p-3 rounded-lg border">
+                                <div className="text-xs text-gray-500 font-bold uppercase">Facção</div>
+                                <div className="font-bold text-gray-800">{selectedOsfForReturn.subcontractorName}</div>
+                            </div>
+                            <div className="bg-gray-50 p-3 rounded-lg border text-right">
+                                <div className="text-xs text-gray-500 font-bold uppercase">Enviado</div>
+                                <div className="font-bold text-lg text-blue-600">{selectedOsfForReturn.sentQuantity} pçs</div>
+                            </div>
+                        </div>
+
+                        {/* PREVIEW MATRIX (REFERENCE) */}
+                        <div className="mb-6 bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                            <h4 className="text-xs font-bold text-blue-800 uppercase mb-2 flex items-center gap-2"><LayoutList size={14}/> Grade de Envio (Referência)</h4>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-center text-xs opacity-80">
+                                    <thead>
+                                        <tr className="text-gray-500 border-b border-blue-200">
+                                            <th className="text-left py-1">Cor</th>
+                                            {matrixKeys.sizes.map(s => <th key={s} className="w-12">{s}</th>)}
+                                            <th className="w-12 font-bold">Total</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {matrixKeys.colors.map(color => (
+                                            <tr key={color}>
+                                                <td className="text-left font-bold py-1 text-gray-700">{color}</td>
+                                                {matrixKeys.sizes.map(size => {
+                                                    const sent = getSentQty(color, size);
+                                                    return <td key={size} className={sent > 0 ? "text-blue-700 font-bold" : "text-gray-300"}>{sent || '-'}</td>
+                                                })}
+                                                <td className="font-bold text-gray-800">{matrixKeys.sizes.reduce((acc, s) => acc + getSentQty(color, s), 0)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div className="flex justify-center mb-4 text-gray-300"><ArrowDown size={24}/></div>
+
+                        {/* MATRIX INPUT */}
+                        <div className="mb-6">
+                            <h4 className="text-sm font-bold text-gray-800 uppercase mb-3 flex items-center gap-2"><Grid3X3 size={16}/> Grade de Recebimento (Real)</h4>
+                            
+                            <div className="border-2 border-gray-200 rounded-xl overflow-hidden shadow-sm bg-white">
+                                <table className="w-full text-center text-sm">
+                                    <thead className="bg-green-50 text-green-900 font-bold">
+                                        <tr>
+                                            <th className="p-3 text-left">Cor / Tamanho</th>
+                                            {matrixKeys.sizes.map(s => <th key={s} className="p-3 w-16">{s}</th>)}
+                                            <th className="p-3 w-20 bg-green-100 border-l border-green-200">Total</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {matrixKeys.colors.map(color => {
+                                            const rowTotal = matrixKeys.sizes.reduce((acc, s) => acc + getReturnQty(color, s), 0);
+                                            return (
+                                                <tr key={color} className="hover:bg-gray-50">
+                                                    <td className="p-3 text-left font-medium text-gray-800 flex items-center gap-2">
+                                                        <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
+                                                        {color}
+                                                    </td>
+                                                    {matrixKeys.sizes.map(size => {
+                                                        const sent = getSentQty(color, size);
+                                                        const current = getReturnQty(color, size);
+                                                        const isFull = current === sent && sent > 0;
+                                                        
+                                                        return (
+                                                            <td key={size} className="p-1">
+                                                                {sent > 0 ? (
+                                                                    <div className="relative">
+                                                                        <input 
+                                                                            type="number"
+                                                                            min="0"
+                                                                            className={`w-full text-center font-bold border rounded p-1.5 outline-none transition-colors
+                                                                                ${isFull ? 'bg-green-50 border-green-300 text-green-700' : 'bg-white border-gray-200 text-gray-900 focus:border-blue-400 focus:ring-2 focus:ring-blue-100'}
+                                                                            `}
+                                                                            placeholder="0"
+                                                                            value={current === 0 ? '' : current}
+                                                                            onChange={(e) => updateMatrixValue(color, size, Number(e.target.value))}
+                                                                        />
+                                                                        <div className="text-[9px] text-gray-400 mt-0.5 text-center">Env: {sent}</div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <span className="text-gray-200 text-xs">-</span>
+                                                                )}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                    <td className="p-3 font-bold bg-gray-50 border-l text-gray-800">{rowTotal}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {/* Total Row */}
+                                        <tr className="bg-gray-100 font-bold border-t-2 border-gray-300">
+                                            <td className="p-3 text-left text-gray-600">TOTAL GERAL</td>
+                                            {matrixKeys.sizes.map(s => (
+                                                <td key={s} className="p-3 text-gray-700">
+                                                    {matrixKeys.colors.reduce((acc, c) => acc + getReturnQty(c, s), 0)}
+                                                </td>
+                                            ))}
+                                            <td className="p-3 text-lg text-green-700">
+                                                {returnItems.reduce((a,b) => a + b.quantity, 0)}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 mb-1">Nome do Conferente <span className="text-red-500">*</span></label>
+                            <input className={`w-full border rounded p-3 ${conferenteError ? 'border-red-500 ring-2 ring-red-200' : 'border-gray-300'}`} placeholder="Quem está recebendo?" value={conferenteName} onChange={e => { setConferenteName(e.target.value); if(e.target.value) setConferenteError(false); }}/>
+                            {conferenteError && <p className="text-xs text-red-500 mt-1">Este campo é obrigatório.</p>}
                         </div>
                     </div>
-
-                    <div className="flex gap-3 mt-6">
-                        <button 
-                            onClick={() => setSelectedOpForPrint(null)}
-                            className="flex-1 py-3 border border-gray-300 rounded-xl font-bold text-gray-600 hover:bg-gray-50"
-                        >
-                            Cancelar
-                        </button>
-                        <button 
-                            onClick={handleConfirmSend}
-                            disabled={!targetPartner}
-                            className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            Confirmar & Imprimir
+                    <div className="p-4 bg-gray-50 border-t text-right shrink-0 flex justify-end gap-3">
+                        <button onClick={() => setIsReturnModalOpen(false)} className="px-6 py-2 rounded text-gray-600 font-bold hover:bg-gray-100">Cancelar</button>
+                        <button onClick={handleSaveReturn} className="bg-green-600 text-white px-8 py-2 rounded font-bold hover:bg-green-700 shadow-lg flex items-center gap-2">
+                            <Save size={18}/> Salvar Retorno
                         </button>
                     </div>
                 </div>
             </div>
-        </div>
-      )}
-
-      {/* PRINT MODAL (Professional Layout) */}
-      {selectedOsfForPrint && (
-          <div className="fixed inset-0 bg-gray-600/90 z-50 flex justify-center overflow-y-auto">
-              <div className="relative my-8">
-                  <div className="absolute -top-10 right-0 flex gap-2 no-print">
-                      <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2"><Printer size={18}/> Imprimir</button>
-                      <button onClick={() => setSelectedOsfForPrint(null)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded shadow font-bold hover:bg-gray-300 flex items-center gap-2"><X size={18}/> Fechar</button>
-                  </div>
-                  {renderPrintableOsf()}
-              </div>
-          </div>
-      )}
-
-      {/* Return Modal Code... (unchanged) */}
-      {isReturnModalOpen && selectedOsfForReturn && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-              {/* Modal Content - Unchanged Logic */}
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden animate-scale-in">
-                  <div className="bg-green-600 p-4 text-white flex justify-between items-center">
-                      <h3 className="font-bold text-lg flex items-center gap-2"><Undo2/> Registrar Retorno de Facção</h3>
-                      <button onClick={() => setIsReturnModalOpen(false)}><X/></button>
-                  </div>
-                  <div className="p-6">
-                      <div className="mb-4 bg-green-50 p-4 rounded text-sm grid grid-cols-2 gap-4">
-                          <div>OSF: <b>{selectedOsfForReturn.id}</b></div>
-                          <div>Enviado Total: <b>{selectedOsfForReturn.sentQuantity}</b></div>
-                      </div>
-                      
-                      <div className="mb-4">
-                          <label className="block text-sm font-bold text-gray-700 mb-1">Nome do Conferente <span className="text-red-500">*</span></label>
-                          <input 
-                            className={`w-full border rounded p-2 focus:outline-none ${conferenteError ? 'border-red-500 ring-2 ring-red-200 bg-red-50' : 'focus:ring-2 focus:ring-green-500'}`}
-                            placeholder="Quem recebeu as peças?"
-                            value={conferenteName}
-                            onChange={e => { setConferenteName(e.target.value); setConferenteError(false); }}
-                          />
-                      </div>
-
-                      <div className="max-h-64 overflow-y-auto border rounded mb-4">
-                          <table className="w-full text-sm text-center">
-                              <thead className="bg-gray-100 font-bold sticky top-0">
-                                  <tr>
-                                      <th className="p-2">Cor</th>
-                                      <th className="p-2">Tam</th>
-                                      <th className="p-2">Qtd Recebida</th>
-                                  </tr>
-                              </thead>
-                              <tbody>
-                                  {returnItems.map((item, idx) => (
-                                      <tr key={idx} className="border-b">
-                                          <td className="p-2">{item.color}</td>
-                                          <td className="p-2">{item.size}</td>
-                                          <td className="p-2">
-                                              <input 
-                                                type="number" className="border rounded w-20 text-center font-bold p-1"
-                                                value={item.quantity || ''}
-                                                onChange={e => updateReturnQty(idx, 'quantity', Number(e.target.value))}
-                                                placeholder="0"
-                                              />
-                                          </td>
-                                      </tr>
-                                  ))}
-                              </tbody>
-                          </table>
-                      </div>
-                      
-                      <div className="mt-4 text-right">
-                          <button onClick={handleSaveReturn} className="bg-green-600 text-white px-6 py-2 rounded font-bold hover:bg-green-700 flex items-center gap-2 ml-auto">
-                              <Save size={18}/> Salvar & Calcular Saldo
-                          </button>
-                      </div>
-                  </div>
-              </div>
-          </div>
-      )}
+        )}
     </div>
   );
 };

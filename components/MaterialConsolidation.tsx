@@ -1,19 +1,25 @@
 
 import React, { useEffect, useState } from 'react';
-import { ConsolidatedRequirement, ProductionOrder, OrderStatus } from '../types';
-import { MockService } from '../services/mockDb';
-import { CheckSquare, Calculator, Printer, Download, AlertTriangle, CheckCircle } from 'lucide-react';
+import { ConsolidatedRequirement, ProductionOrder, OrderStatus, Product, TechPack } from '../types';
+import { ApiService } from '../services/api';
+import { CheckSquare, Calculator, Printer, Download, AlertTriangle, CheckCircle, RefreshCcw } from 'lucide-react';
 
 export const MaterialConsolidation: React.FC = () => {
   const [ops, setOps] = useState<ProductionOrder[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [selectedOpIds, setSelectedOpIds] = useState<string[]>([]);
   const [requirements, setRequirements] = useState<ConsolidatedRequirement[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    MockService.getProductionOrders().then(allOps => {
-        // Filter OPs: "somente apareca se ela estiver ate a facção"
-        // Hide: Review, Packing, Completed, Cancelled
+    // Need products to get Tech Packs for accurate calculation
+    const init = async () => {
+        const [allOps, allProds] = await Promise.all([
+            ApiService.getProductionOrders(),
+            ApiService.getProducts()
+        ]);
+        
+        // Filter: Active OPs not yet shipped (or just for planning)
         const visibleOps = allOps.filter(op => 
             op.status === OrderStatus.PLANNED || 
             op.status === OrderStatus.CUTTING || 
@@ -21,7 +27,9 @@ export const MaterialConsolidation: React.FC = () => {
             op.status === OrderStatus.DRAFT
         );
         setOps(visibleOps);
-    });
+        setProducts(allProds);
+    };
+    init();
   }, []);
 
   const toggleOp = (id: string) => {
@@ -32,8 +40,97 @@ export const MaterialConsolidation: React.FC = () => {
 
   const handleCalculate = async () => {
     setLoading(true);
-    const result = await MockService.calculateConsolidatedRequirements(selectedOpIds);
-    setRequirements(result);
+    // Client-side detailed calculation to support Color Variants
+    // We cannot rely on the simple API consolidation if we want color details
+    
+    const mats = await ApiService.getMaterials();
+    const tempReqs: Record<string, { material: any, needed: number, color?: string }> = {};
+
+    selectedOpIds.forEach(opId => {
+        const op = ops.find(o => o.id === opId);
+        if(!op) return;
+        
+        const prod = products.find(p => p.id === op.productId);
+        const tp = prod?.techPacks.find(t => t.version === op.techPackVersion) || prod?.techPacks[0];
+        
+        if(!tp || !tp.materials) return;
+
+        // Calculate quantities per color for this OP
+        const opQtyByColor: Record<string, number> = {};
+        op.items.forEach(i => {
+            opQtyByColor[i.color] = (opQtyByColor[i.color] || 0) + i.quantity;
+        });
+        const opTotalQty = op.quantityTotal;
+
+        tp.materials.forEach(bom => {
+            const mat = mats.find(m => m.id === bom.materialId);
+            if(!mat) return;
+
+            // Logic: Color Variant or General
+            if (bom.variesWithColor) {
+                // Break down by active colors in this OP
+                Object.entries(opQtyByColor).forEach(([color, qty]) => {
+                    if(qty > 0) {
+                        const needed = qty * bom.usagePerPiece * (1 + bom.wasteMargin);
+                        const key = `${mat.id}-${color}`;
+                        if(!tempReqs[key]) {
+                            // Create "Virtual" material entry for the specific color
+                            tempReqs[key] = { 
+                                material: { ...mat, name: `${mat.name} (${color})` }, 
+                                needed: 0,
+                                color: color 
+                            };
+                        }
+                        tempReqs[key].needed += needed;
+                    }
+                });
+            } else if (bom.colorVariant && bom.colorVariant !== '' && bom.colorVariant !== 'Geral') {
+                // Specific mapping
+                const qty = opQtyByColor[bom.colorVariant] || 0;
+                if(qty > 0) {
+                    const needed = qty * bom.usagePerPiece * (1 + bom.wasteMargin);
+                    const key = `${mat.id}-${bom.colorVariant}`;
+                    if(!tempReqs[key]) {
+                        tempReqs[key] = { 
+                            material: { ...mat, name: `${mat.name} (${bom.colorVariant})` }, 
+                            needed: 0,
+                            color: bom.colorVariant
+                        };
+                    }
+                    tempReqs[key].needed += needed;
+                }
+            } else {
+                // General
+                const needed = opTotalQty * bom.usagePerPiece * (1 + bom.wasteMargin);
+                const key = mat.id;
+                if(!tempReqs[key]) {
+                    tempReqs[key] = { material: mat, needed: 0 };
+                }
+                tempReqs[key].needed += needed;
+            }
+        });
+    });
+
+    const result: ConsolidatedRequirement[] = Object.values(tempReqs).map(item => {
+        // Find if we have stock for this specific variant? 
+        // For now, we compare against Total Stock of the material, unless the material has variants.
+        let stockQty = item.material.currentStock;
+        
+        // If material has variants in DB, try to match
+        if (item.material.hasColors && item.material.variants && item.color) {
+            const variant = item.material.variants.find((v: any) => v.name === item.color);
+            if (variant) stockQty = variant.stock;
+        }
+
+        return {
+            material: item.material,
+            requiredQty: item.needed,
+            stockQty: stockQty,
+            status: stockQty >= item.needed ? 'ok' : 'critical'
+        };
+    });
+
+    setRequirements(result.sort((a,b) => a.material.name.localeCompare(b.material.name)));
     setLoading(false);
   };
 
@@ -41,7 +138,7 @@ export const MaterialConsolidation: React.FC = () => {
     <div className="space-y-6">
       <div className="no-print">
         <h1 className="text-2xl font-bold text-gray-900">Soma de Aviamentos & Insumos</h1>
-        <p className="text-gray-500 text-sm">Consolide o consumo de múltiplas OPs para compras ou separação (Apenas OPs até fase de Facção).</p>
+        <p className="text-gray-500 text-sm">Consolide o consumo de múltiplas OPs para compras ou separação. <span className="text-blue-600 font-bold">Agora considera variações de cor da Ficha Técnica.</span></p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -90,7 +187,7 @@ export const MaterialConsolidation: React.FC = () => {
             disabled={selectedOpIds.length === 0 || loading}
             className="w-full mt-4 flex items-center justify-center gap-2 bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50"
           >
-            <Calculator size={18} /> Calcular Necessidade
+            {loading ? <RefreshCcw size={18} className="animate-spin"/> : <Calculator size={18} />} Calcular Necessidade
           </button>
         </div>
 
@@ -119,9 +216,9 @@ export const MaterialConsolidation: React.FC = () => {
                 <thead className="bg-gray-100 text-gray-600 font-medium">
                   <tr>
                     <th className="p-3">Código</th>
-                    <th className="p-3">Material / Insumo</th>
+                    <th className="p-3">Material / Variante</th>
                     <th className="p-3 text-right">Necessidade Total</th>
-                    <th className="p-3 text-right">Estoque Atual</th>
+                    <th className="p-3 text-right">Estoque (Cor)</th>
                     <th className="p-3 text-center">Status</th>
                   </tr>
                 </thead>
@@ -157,7 +254,7 @@ export const MaterialConsolidation: React.FC = () => {
               
               {/* Footer Summary for Print */}
               <div className="p-4 border-t mt-4 text-xs text-gray-500 print-only">
-                 Relatório gerado em {new Date().toLocaleString()} | Usuário: John Doe
+                 Relatório gerado em {new Date().toLocaleString()} | Módulo de Consolidação
               </div>
             </div>
           )}

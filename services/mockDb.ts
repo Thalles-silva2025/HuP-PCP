@@ -4,7 +4,7 @@ import {
   StandardObservation, Color, SubcontractorOrder, FinishedProductStock, 
   WIPItem, ConsolidatedRequirement, OrderStatus, ProductStatus, 
   UnitOfMeasure, ReturnItem, MaterialType, CuttingJob, PaymentRecord, 
-  Warehouse, ProductionGoal, TechPack, BOMItem, Operation, MeasurementPoint, ProductionLink
+  Warehouse, ProductionGoal, TechPack, BOMItem, Operation, MeasurementPoint
 } from '../types';
 
 // --- CONFIGURAÇÃO DA SIMULAÇÃO ---
@@ -84,10 +84,10 @@ let materials: Material[] = [
     { id: 'MAT-08', code: 'BOJ-BOL', name: 'Bojo Bolha (Par)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 2000, costUnit: 2.50, supplier: 'Delfa', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-boj-${c.id}`, name: c.name, stock: 200 })) },
     { id: 'MAT-09', code: 'ARO-MET', name: 'Aro Metálico (Sutiã)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 5000, costUnit: 0.80, supplier: 'Metalsinos', status: 'Ativo' },
     { id: 'MAT-10', code: 'FEC-COS', name: 'Fecho Costas (Colchete)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 4000, costUnit: 0.50, supplier: 'Haco', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-fec-${c.id}`, name: c.name, stock: 400 })) },
-    { id: 'MAT-11', code: 'LAC-001', name: 'Lacinho de Cetim (Enfeite)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 10000, costUnit: 0.10, supplier: 'Aviamentos SP', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-lac-${c.id}`, name: c.name, stock: 1000 })) },
-    { id: 'MAT-12', code: 'ETI-001', name: 'Etiqueta Composição', type: MaterialType.LABEL, unit: UnitOfMeasure.UNIT, currentStock: 20000, costUnit: 0.05, supplier: 'Haco', status: 'Ativo' },
-    { id: 'MAT-13', code: 'SAC-001', name: 'Saco PP Adesivado', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 15000, costUnit: 0.15, supplier: 'Embalagens Ltda', status: 'Ativo' },
-    { id: 'MAT-14', code: 'CX-001', name: 'Caixa de Expedição Padrão', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 500, costUnit: 3.50, supplier: 'Klabin', status: 'Ativo' }
+    { id: 'MAT-11', code: 'LAC-CET', name: 'Lacinho de Cetim (Enfeite)', type: MaterialType.TRIM, unit: UnitOfMeasure.UNIT, currentStock: 10000, costUnit: 0.10, supplier: 'Aviamentos SP', status: 'Ativo', hasColors: true, variants: colors.map(c => ({ id: `var-lac-${c.id}`, name: c.name, stock: 1000 })) },
+    { id: 'MAT-12', code: 'ETI-CMP', name: 'Etiqueta Composição', type: MaterialType.LABEL, unit: UnitOfMeasure.UNIT, currentStock: 20000, costUnit: 0.05, supplier: 'Haco', status: 'Ativo' },
+    { id: 'MAT-13', code: 'SAC-PP', name: 'Saco PP Adesivado', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 15000, costUnit: 0.15, supplier: 'Embalagens Ltda', status: 'Ativo' },
+    { id: 'MAT-14', code: 'CX-PAD', name: 'Caixa de Expedição Padrão', type: MaterialType.PACKAGING, unit: UnitOfMeasure.UNIT, currentStock: 500, costUnit: 3.50, supplier: 'Klabin', status: 'Ativo' }
 ];
 
 // --- 3. PRODUTOS & FICHAS TÉCNICAS (20 Itens) ---
@@ -110,7 +110,8 @@ const createTechPack = (prodId: string, materialsList: any[], operationsList: an
         })),
         measurements: [{ id: 'm1', name: 'Cintura', tolerance: 1, values: { 'P': 32, 'M': 34, 'G': 36 } }],
         standardObservations: ['obs-1', 'obs-3', 'obs-5', 'obs-6'], // Linkando observações padrão
-        materialCost: matCost, laborCost: labor, totalCost: totalCost, targetMargin: 100, suggestedPrice: price, currentPrice: price
+        materialCost: matCost, laborCost: labor, totalCost: totalCost, targetMargin: 100, suggestedPrice: price, currentPrice: price,
+        activeSizes: ['P', 'M', 'G'] // Default active sizes
     };
 };
 
@@ -156,6 +157,8 @@ products = productDefinitions.map((def, i) => {
     const pid = `PROD-${(i+1).toString().padStart(2, '0')}`;
     const standardOpsList = [standardOps[0], standardOps[1], standardOps[4]]; // Generic ops
     const tp = createTechPack(pid, def.mats, standardOpsList, def.price, def.labor);
+    // Update TP with Active Sizes from Definition
+    tp.activeSizes = def.sizes;
     
     return {
         id: pid, sku: def.sku, name: def.name, collection: 'Intimates 2025',
@@ -172,8 +175,6 @@ let subcontractorOrders: SubcontractorOrder[] = [];
 let finishedStock: FinishedProductStock[] = [];
 let payments: PaymentRecord[] = [];
 let productionGoals: ProductionGoal[] = [];
-// Storage for QR Links
-let productionLinks: ProductionLink[] = [];
 
 // Gerar Metas
 for (let i=1; i<=12; i++) {
@@ -314,12 +315,26 @@ export const MockService = {
   saveProduct: async (product: Partial<Product>) => {
     await delay(200);
     if (product.id) {
+      // Correctly update the product in the array reference
       products = products.map(p => p.id === product.id ? { ...p, ...product } as Product : p);
     } else {
       const newProduct = { ...product, id: `PROD-${Date.now()}`, techPacks: [] } as Product;
       products.push(newProduct);
     }
     return true;
+  },
+  
+  // FIXED: Delete methods that correctly mutate the in-memory array
+  deleteProduct: async (id: string) => {
+      await delay(200);
+      products = products.filter(p => p.id !== id);
+      return true;
+  },
+
+  deleteProducts: async (ids: string[]) => {
+      await delay(200);
+      products = products.filter(p => !ids.includes(p.id));
+      return true;
   },
   
   saveTechPack: async (techPack: TechPack) => {
@@ -354,7 +369,6 @@ export const MockService = {
   getProductionOrderById: async (id: string) => { await delay(100); return productionOrders.find(op => op.id === id) || null; },
   
   createProductionOrder: async (opData: any) => {
-    // ... (Existing create logic) ...
     await delay(300);
     let finalDueDate = opData.dueDate;
     if (!finalDueDate) {
@@ -382,14 +396,6 @@ export const MockService = {
             let newEvents = op.events ? [...op.events] : [];
             
             // --- AUTOMATED TRIGGERS ---
-            
-            // 1. Payment Trigger: CUTTING (Existing logic)
-            // ...
-
-            // 2. Payment Trigger: REVISION FINALIZED (Existing logic)
-            // ...
-
-            // 3. AUTO-CREATE STOCK (GRANULAR)
             if (data.status === OrderStatus.COMPLETED && op.status !== OrderStatus.COMPLETED) {
                  const warehouseName = data.packingDetails?.warehouse || op.packingDetails?.warehouse || 'Estoque Central';
                  
@@ -418,39 +424,6 @@ export const MockService = {
         return op;
     });
     return true;
-  },
-
-  // --- QR CODE GENERATION LOGIC ---
-  generateProductionLink: async (opId: string) => {
-      await delay(300);
-      const op = productionOrders.find(o => o.id === opId);
-      if (!op) throw new Error("OP não encontrada");
-
-      // Check if active link exists
-      const existing = productionLinks.find(l => l.opId === opId && l.active);
-      if (existing) return existing;
-
-      const now = new Date();
-      const expires = new Date();
-      expires.setDate(now.getDate() + 30); // 30 dias de validade
-
-      const newLink: ProductionLink = {
-          id: `lnk-${Date.now()}`,
-          opId,
-          token: Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10), // Token único
-          type: 'GENERAL',
-          createdAt: now.toISOString(),
-          expiresAt: expires.toISOString(),
-          active: true,
-          views: 0
-      };
-      
-      productionLinks.push(newLink);
-      
-      // Update OP to reference this link
-      productionOrders = productionOrders.map(o => o.id === opId ? { ...o, activeLink: newLink } : o);
-      
-      return newLink;
   },
 
   // ... (Other OP methods) ...

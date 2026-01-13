@@ -1,11 +1,21 @@
 
+/**
+ * 🔒 MÓDULO CADASTROS (SETTINGS) - PROTEGIDO
+ * ---------------------------------------------------
+ * Status: FROZEN / STABLE
+ * 
+ * Gerenciamento de Tabelas Auxiliares e Dados Mestres.
+ */
+
 import React, { useState, useEffect } from 'react';
-import { MockService } from '../services/mockDb';
+import { ApiService } from '../services/api'; // Alterado para ApiService
 import { Material, MaterialType, UnitOfMeasure, StandardOperation, Partner, Color, StandardObservation, Warehouse, MaterialVariant } from '../types';
-import { Settings, Plus, Trash2, Database, Truck, Scissors, Box, Layers, Ruler, Tag, Save, Edit2, MapPin, Phone, Palette, StickyNote, Users, Power, X, ChevronDown, Check } from 'lucide-react';
+import { Settings, Plus, Trash2, Database, Truck, Scissors, Box, Layers, Ruler, Tag, Save, Edit2, MapPin, Phone, Palette, StickyNote, Users, Power, X, ChevronDown, Check, AlertTriangle } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
 
 export const SettingsModule: React.FC = () => {
-  const [activeTab, setActiveTab] = useState('materials'); // Default alterado para materiais
+  const { addToast } = useToast();
+  const [activeTab, setActiveTab] = useState('materials'); 
   const [standardOps, setStandardOps] = useState<StandardOperation[]>([]);
   const [sizes, setSizes] = useState<string[]>([]);
   const [units, setUnits] = useState<string[]>([]);
@@ -46,66 +56,102 @@ export const SettingsModule: React.FC = () => {
   const [editingWarehouse, setEditingWarehouse] = useState<Partial<Warehouse>>({ type: 'Interno' });
   const [isWarehouseModalOpen, setIsWarehouseModalOpen] = useState(false);
 
+  // DELETE CONFIRMATION STATE
+  const [deleteModal, setDeleteModal] = useState<{isOpen: boolean, type: 'op' | 'size' | 'unit' | 'color' | 'obs' | 'material' | 'partner' | 'warehouse', id: string, label: string} | null>(null);
+
   useEffect(() => {
     loadData();
   }, [activeTab]);
 
   const loadData = async () => {
-    const [ops, sz, un, mats, ptrs, cols, obs, wh] = await Promise.all([
-       MockService.getStandardOperations(),
-       MockService.getStandardSizes(),
-       MockService.getStandardUnits(),
-       MockService.getMaterials(),
-       MockService.getPartners(),
-       MockService.getColors(),
-       MockService.getObservations(),
-       MockService.getWarehouses()
-    ]);
-    setStandardOps(ops);
-    setSizes(sz);
-    setUnits(un);
-    setMaterials(mats);
-    setPartners(ptrs);
-    setColors(cols);
-    setObservations(obs);
-    setWarehouses(wh);
+    try {
+        const [ops, sz, un, mats, ptrs, cols, obs, wh] = await Promise.all([
+           ApiService.getStandardOperations(),
+           ApiService.getStandardSizes(),
+           ApiService.getStandardUnits(),
+           ApiService.getMaterials(),
+           ApiService.getPartners(),
+           ApiService.getColors(),
+           ApiService.getObservations(),
+           ApiService.getWarehouses()
+        ]);
+        setStandardOps(ops);
+        setSizes(sz);
+        setUnits(un);
+        setMaterials(mats);
+        setPartners(ptrs);
+        setColors(cols);
+        setObservations(obs);
+        setWarehouses(wh);
+    } catch (error: any) {
+        addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados: ' + error.message });
+    }
   };
 
-  // ... (Keep existing add/remove/save handlers for standard types) ...
   const handleAdd = async (e: React.FormEvent, type: 'op' | 'size' | 'unit') => {
     e.preventDefault();
     if (!newInput) return;
-    if (type === 'op') {
-        if(!newMachine) { alert('Informe a máquina/recurso'); return; }
-        setStandardOps(await MockService.addStandardOperation(newInput, newMachine));
-        setNewMachine('');
+    try {
+        if (type === 'op') {
+            if(!newMachine) { alert('Informe a máquina/recurso'); return; }
+            setStandardOps(await ApiService.addStandardOperation(newInput, newMachine));
+            setNewMachine('');
+        }
+        if (type === 'size') setSizes(await ApiService.addStandardSize(newInput));
+        if (type === 'unit') setUnits(await ApiService.addStandardUnit(newInput));
+        setNewInput('');
+        addToast({ type: 'success', title: 'Sucesso', message: 'Item adicionado.' });
+    } catch (e: any) { 
+        addToast({ type: 'error', title: 'Erro', message: e.message });
     }
-    if (type === 'size') setSizes(await MockService.addStandardSize(newInput));
-    if (type === 'unit') setUnits(await MockService.addStandardUnit(newInput));
-    setNewInput('');
   };
 
   const handleAddColor = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!newColorName) return;
-      setColors(await MockService.addColor(newColorName, newColorHex));
-      setNewColorName('');
-      setNewColorHex('#000000');
+      try {
+          setColors(await ApiService.addColor(newColorName, newColorHex));
+          setNewColorName('');
+          setNewColorHex('#000000');
+          addToast({ type: 'success', title: 'Sucesso', message: 'Cor adicionada.' });
+      } catch (e: any) { addToast({ type: 'error', title: 'Erro', message: e.message }); }
   };
 
   const handleAddObs = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!newObsText) return;
-      setObservations(await MockService.addObservation(newObsText, newObsCategory));
-      setNewObsText('');
+      try {
+          setObservations(await ApiService.addObservation(newObsText, newObsCategory));
+          setNewObsText('');
+          addToast({ type: 'success', title: 'Sucesso', message: 'Observação adicionada.' });
+      } catch (e: any) { addToast({ type: 'error', title: 'Erro', message: e.message }); }
   };
 
-  const handleRemove = async (nameOrId: string, type: 'op' | 'size' | 'unit' | 'color' | 'obs') => {
-    if (type === 'op') setStandardOps(await MockService.removeStandardOperation(nameOrId));
-    if (type === 'size') setSizes(await MockService.removeStandardSize(nameOrId));
-    if (type === 'unit') setUnits(await MockService.removeStandardUnit(nameOrId));
-    if (type === 'color') setColors(await MockService.removeColor(nameOrId));
-    if (type === 'obs') setObservations(await MockService.removeObservation(nameOrId));
+  // --- NEW DELETE LOGIC ---
+  const requestDelete = (id: string, type: any, label: string) => {
+      setDeleteModal({ isOpen: true, type, id, label });
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteModal) return;
+    const { type, id } = deleteModal;
+
+    try {
+        if (type === 'op') setStandardOps(await ApiService.removeStandardOperation(id));
+        if (type === 'size') setSizes(await ApiService.removeStandardSize(id)); 
+        if (type === 'unit') setUnits(await ApiService.removeStandardUnit(id));
+        if (type === 'color') setColors(await ApiService.removeColor(id));
+        if (type === 'obs') setObservations(await ApiService.removeObservation(id));
+        if (type === 'material') setMaterials(await ApiService.deleteMaterial(id));
+        if (type === 'partner') setPartners(await ApiService.deletePartner(id));
+        if (type === 'warehouse') setWarehouses(await ApiService.deleteWarehouse(id));
+
+        addToast({ type: 'success', title: 'Excluído', message: 'Item removido com sucesso.' });
+    } catch (e: any) { 
+        addToast({ type: 'error', title: 'Erro ao excluir', message: e.message });
+    } finally {
+        setDeleteModal(null);
+    }
   };
 
   // --- MATERIAL LOGIC REFACTORED ---
@@ -120,21 +166,20 @@ export const SettingsModule: React.FC = () => {
         finalStock = editingMaterial.variants.reduce((acc, v) => acc + v.stock, 0);
     }
 
-    await MockService.saveMaterial({
+    await ApiService.saveMaterial({
         ...editingMaterial,
         currentStock: finalStock
     });
     
-    const updatedMats = await MockService.getMaterials();
+    const updatedMats = await ApiService.getMaterials();
     setMaterials(updatedMats);
     setEditingMaterial({ type: MaterialType.FABRIC, unit: UnitOfMeasure.KG, status: 'Ativo', hasColors: false, variants: [] }); 
-    alert('Material salvo com sucesso!');
+    addToast({ type: 'success', title: 'Salvo', message: 'Material salvo com sucesso!' });
   };
 
   const handleAddVariant = () => {
       if (!variantInputName) return;
       
-      // Check if variant name already exists
       if (editingMaterial.variants?.some(v => v.name.toLowerCase() === variantInputName.toLowerCase())) {
           alert('Esta cor já foi adicionada.');
           return;
@@ -166,20 +211,14 @@ export const SettingsModule: React.FC = () => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleDeleteMaterial = async (id: string) => {
-      if(confirm('Tem certeza que deseja excluir este material?')) {
-          const updated = await MockService.deleteMaterial(id);
-          setMaterials(updated);
-      }
-  };
-
   const handleToggleMaterialStatus = async (material: Material) => {
       const newStatus = material.status === 'Ativo' ? 'Inativo' : 'Ativo';
-      await MockService.saveMaterial({ ...material, status: newStatus });
-      setMaterials(await MockService.getMaterials());
+      await ApiService.saveMaterial({ ...material, status: newStatus });
+      setMaterials(await ApiService.getMaterials());
+      addToast({ type: 'info', title: 'Status Atualizado', message: `Material agora está ${newStatus}.` });
   };
 
-  // ... (Partner & Warehouse logic unchanged)
+  // ... (Partner & Warehouse logic)
   const handleSavePartner = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!editingPartner.name) return;
@@ -192,16 +231,11 @@ export const SettingsModule: React.FC = () => {
           phone: editingPartner.phone,
           defaultRate: editingPartner.defaultRate || 0
       };
-      const updated = await MockService.savePartner(newPartner);
+      const updated = await ApiService.savePartner(newPartner);
       setPartners(updated);
       setIsPartnerModalOpen(false);
       setEditingPartner({});
-  };
-
-  const handleDeletePartner = async (id: string) => {
-      if(confirm('Tem certeza?')) {
-          setPartners(await MockService.deletePartner(id));
-      }
+      addToast({ type: 'success', title: 'Salvo', message: 'Parceiro salvo com sucesso.' });
   };
 
   const openPartnerModal = (partner?: Partner) => {
@@ -212,17 +246,11 @@ export const SettingsModule: React.FC = () => {
   const handleSaveWarehouse = async (e: React.FormEvent) => {
       e.preventDefault();
       if(!editingWarehouse.name) return;
-      const updated = await MockService.saveWarehouse(editingWarehouse as Warehouse);
+      const updated = await ApiService.saveWarehouse(editingWarehouse as Warehouse);
       setWarehouses(updated);
       setIsWarehouseModalOpen(false);
       setEditingWarehouse({ type: 'Interno' });
-  };
-
-  const handleDeleteWarehouse = async (id: string) => {
-      if(confirm('Tem certeza que deseja excluir este depósito?')) {
-          const updated = await MockService.deleteWarehouse(id);
-          setWarehouses(updated);
-      }
+      addToast({ type: 'success', title: 'Salvo', message: 'Depósito salvo com sucesso.' });
   };
 
   const openWarehouseModal = (wh?: Warehouse) => {
@@ -231,7 +259,7 @@ export const SettingsModule: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
       <div>
         <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
           <Database className="text-gray-600" /> Cadastros Gerais
@@ -271,7 +299,7 @@ export const SettingsModule: React.FC = () => {
         {/* Content Area */}
         <div className="md:col-span-3 bg-white rounded-xl shadow-sm border p-6 min-h-[500px]">
           
-          {/* MATERIALS TAB (FULL FORM REFACTORED) */}
+          {/* MATERIALS TAB */}
           {activeTab === 'materials' && (
             <div>
               <h2 className="text-xl font-bold mb-6 border-b pb-2 flex items-center gap-2">
@@ -486,7 +514,7 @@ export const SettingsModule: React.FC = () => {
                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
                                <button onClick={() => handleEditMaterial(m)} className="p-1.5 bg-blue-100 text-blue-600 rounded hover:bg-blue-200" title="Editar"><Edit2 size={14}/></button>
                                <button onClick={() => handleToggleMaterialStatus(m)} className={`p-1.5 rounded hover:opacity-80 ${m.status === 'Inativo' ? 'bg-green-100 text-green-600' : 'bg-orange-100 text-orange-600'}`} title={m.status === 'Inativo' ? 'Ativar' : 'Inativar'}><Power size={14}/></button>
-                               <button onClick={() => handleDeleteMaterial(m.id)} className="p-1.5 bg-red-100 text-red-600 rounded hover:bg-red-200" title="Excluir"><Trash2 size={14}/></button>
+                               <button onClick={() => requestDelete(m.id, 'material', m.name)} className="p-1.5 bg-red-100 text-red-600 rounded hover:bg-red-200" title="Excluir"><Trash2 size={14}/></button>
                            </div>
                         </div>
                      </div>
@@ -496,9 +524,7 @@ export const SettingsModule: React.FC = () => {
             </div>
           )}
 
-          {/* ... Other Tabs (Partner, Warehouse, Standard Ops) Logic same as before ... */}
-          
-          {/* PARTNERS TAB (Generalized) */}
+          {/* PARTNERS TAB */}
           {activeTab === 'partners' && (
             <div>
               <div className="flex justify-between items-center mb-4 border-b pb-2">
@@ -536,7 +562,7 @@ export const SettingsModule: React.FC = () => {
                         )}
                         <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => openPartnerModal(sub)} className="p-2 bg-blue-100 text-blue-600 rounded hover:bg-blue-200"><Edit2 size={16}/></button>
-                            <button onClick={() => handleDeletePartner(sub.id)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button>
+                            <button onClick={() => requestDelete(sub.id, 'partner', sub.name)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button>
                         </div>
                     </div>
                   </li>
@@ -545,7 +571,7 @@ export const SettingsModule: React.FC = () => {
             </div>
           )}
 
-           {/* WAREHOUSES TAB (Enhanced) */}
+           {/* WAREHOUSES TAB */}
            {activeTab === 'warehouses' && (
             <div>
               <div className="flex justify-between items-center mb-4 border-b pb-2">
@@ -564,7 +590,7 @@ export const SettingsModule: React.FC = () => {
                     </div>
                     <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button onClick={() => openWarehouseModal(w)} className="p-2 bg-blue-100 text-blue-600 rounded hover:bg-blue-200"><Edit2 size={16}/></button>
-                        <button onClick={() => handleDeleteWarehouse(w.id)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button>
+                        <button onClick={() => requestDelete(w.id, 'warehouse', w.name)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button>
                     </div>
                   </li>
                 ))}
@@ -605,7 +631,7 @@ export const SettingsModule: React.FC = () => {
                         <span className="font-bold text-gray-800">{op.name}</span>
                         <span className="text-sm text-gray-500 ml-2">({op.machine})</span>
                     </div>
-                    <button onClick={() => handleRemove(op.name, 'op')} className="text-red-400 hover:text-red-600 p-2">
+                    <button onClick={() => requestDelete(op.id, 'op', op.name)} className="text-red-400 hover:text-red-600 p-2">
                       <Trash2 size={18}/>
                     </button>
                   </div>
@@ -614,7 +640,7 @@ export const SettingsModule: React.FC = () => {
             </div>
           )}
 
-          {/* SIZES TAB */}
+          {/* SIZES TAB - UPDATED WITH MODAL */}
           {activeTab === 'sizes' && (
             <div>
               <h2 className="text-xl font-bold mb-4 border-b pb-2">Tamanhos (Grade)</h2>
@@ -633,7 +659,7 @@ export const SettingsModule: React.FC = () => {
                 {sizes.map(s => (
                   <div key={s} className="flex items-center gap-2 bg-gray-50 px-4 py-2 rounded border">
                     <span className="font-bold text-gray-800">{s}</span>
-                    <button onClick={() => handleRemove(s, 'size')} className="text-red-400 hover:text-red-600">
+                    <button onClick={() => requestDelete(s, 'size', `Tamanho ${s}`)} className="text-red-400 hover:text-red-600">
                       <Trash2 size={14}/>
                     </button>
                   </div>
@@ -676,7 +702,7 @@ export const SettingsModule: React.FC = () => {
                         <div className="w-6 h-6 rounded-full border border-gray-200 shadow-sm" style={{backgroundColor: c.hex}}></div>
                         <span className="font-medium text-gray-800">{c.name}</span>
                     </div>
-                    <button onClick={() => handleRemove(c.id, 'color')} className="text-red-400 hover:text-red-600">
+                    <button onClick={() => requestDelete(c.id, 'color', c.name)} className="text-red-400 hover:text-red-600">
                       <Trash2 size={16}/>
                     </button>
                   </div>
@@ -718,7 +744,7 @@ export const SettingsModule: React.FC = () => {
                         <div className="text-xs text-blue-600 font-bold uppercase mb-1">{obs.category}</div>
                         <span className="font-medium text-gray-800">{obs.text}</span>
                     </div>
-                    <button onClick={() => handleRemove(obs.id, 'obs')} className="text-red-400 hover:text-red-600 p-2">
+                    <button onClick={() => requestDelete(obs.id, 'obs', 'Observação')} className="text-red-400 hover:text-red-600 p-2">
                       <Trash2 size={18}/>
                     </button>
                   </div>
@@ -746,7 +772,7 @@ export const SettingsModule: React.FC = () => {
                 {units.map(u => (
                   <div key={u} className="flex justify-between items-center bg-gray-50 p-3 rounded border">
                     <span className="font-medium text-gray-800">{u}</span>
-                    <button onClick={() => handleRemove(u, 'unit')} className="text-red-400 hover:text-red-600 p-2">
+                    <button onClick={() => requestDelete(u, 'unit', u)} className="text-red-400 hover:text-red-600 p-2">
                       <Trash2 size={18}/>
                     </button>
                   </div>
@@ -757,12 +783,45 @@ export const SettingsModule: React.FC = () => {
         </div>
       </div>
 
+      {/* DELETE CONFIRMATION MODAL */}
+      {deleteModal && (
+          <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+              <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm border-t-4 border-red-500 animate-scale-in">
+                  <div className="flex flex-col items-center text-center">
+                      <div className="w-14 h-14 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4">
+                          <Trash2 size={24}/>
+                      </div>
+                      <h3 className="font-bold text-xl text-gray-900 mb-2">Excluir {deleteModal.label}?</h3>
+                      <p className="text-gray-500 text-sm mb-6">
+                          Esta ação removerá o item do cadastro. Se ele estiver sendo usado em algum histórico antigo, o registro histórico permanecerá, mas o item não aparecerá mais para novos cadastros.
+                      </p>
+                      
+                      <div className="flex gap-3 w-full">
+                          <button 
+                              onClick={() => setDeleteModal(null)}
+                              className="flex-1 py-2.5 border border-gray-300 text-gray-600 font-bold rounded-lg hover:bg-gray-50 transition-colors"
+                          >
+                              Cancelar
+                          </button>
+                          <button 
+                              onClick={confirmDelete}
+                              className="flex-1 py-2.5 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 shadow-md flex items-center justify-center gap-2 transition-colors"
+                          >
+                              Confirmar Exclusão
+                          </button>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
       {/* PARTNER & WAREHOUSE MODALS ... */}
       {isPartnerModalOpen && (
           <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md">
                   <h3 className="font-bold text-lg mb-4">{editingPartner.id ? 'Editar Cadastro' : 'Novo Cadastro'}</h3>
                   <form onSubmit={handleSavePartner} className="space-y-4">
+                      {/* ... fields ... */}
                       <div>
                           <label className="block text-sm font-bold text-gray-700 mb-1">Nome do Parceiro</label>
                           <input className="w-full border rounded p-2" value={editingPartner.name || ''} onChange={e => setEditingPartner({...editingPartner, name: e.target.value})} required placeholder="Razão Social ou Nome"/>

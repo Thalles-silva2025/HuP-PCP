@@ -40,6 +40,7 @@ export interface UserProfile {
   full_name?: string;
   role: 'admin' | 'user';
   created_at?: string;
+  organization_id?: string; // Added for relationship mapping
   // Extended Business Info (Onboarding)
   company_name?: string;
   phone?: string;
@@ -52,18 +53,6 @@ export interface UserProfile {
   loss_areas?: string;
   current_system?: string;
   onboarding_completed?: boolean;
-}
-
-// QR Code & External Access Link
-export interface ProductionLink {
-    id: string;
-    opId: string;
-    token: string; // O código secreto da URL
-    type: 'CUTTING' | 'SEWING' | 'GENERAL';
-    createdAt: string;
-    expiresAt: string; // Validade de 30 dias
-    active: boolean;
-    views: number;
 }
 
 // Master Data Interfaces
@@ -168,6 +157,7 @@ export interface FinishedProductStock {
   id: string;
   productId: string;
   opId?: string;
+  opLotNumber?: string; // NEW: Nome legível da OP (Ex: 2025-001) para exibição
   warehouse: string;
   quantity: number;
   color?: string; // Added variant support
@@ -257,6 +247,10 @@ export interface TechPack {
   suggestedPrice: number;
   currentPrice?: number; // Actual selling price
   salesType: SalesType; // NEW FIELD: Product sales potential
+  
+  // Taxes & Expenses (Strings to support % or absolute)
+  taxes?: string;
+  commercialExpenses?: string;
 }
 
 // FULL FIDELITY PRODUCT INTERFACE (BLING COMPATIBLE)
@@ -267,6 +261,7 @@ export interface Product {
   unit?: string; // Unidade
   status: ProductStatus; // Situação
   collection: string;
+  organizationId?: string; // Added for multi-tenancy support
   
   // Pricing
   defaultPrice?: number; // Preço
@@ -339,6 +334,7 @@ export interface Product {
   cloneParentData?: string; // Clonar dados do pai
 }
 
+// ... existing code ...
 // --- NEW CUTTING MATRIX TYPES ---
 
 export interface MatrixRatio {
@@ -416,7 +412,13 @@ export interface RevisionDetails {
   itemsApproved?: ProductionOrderItem[]; // DETALHAMENTO GRADE APROVADA
 
   reworkQty: number; // 2a Qualidade / Retrabalho (Total)
+  itemsRework?: ProductionOrderItem[]; // DETALHAMENTO RETRABALHO
+
   rejectedQty: number; // Perda (Total)
+  itemsRejected?: ProductionOrderItem[]; // DETALHAMENTO DEFEITO
+
+  missingQty: number; // Faltantes (Total)
+  itemsMissing?: ProductionOrderItem[]; // DETALHAMENTO FALTANTES (Diferença Corte)
   
   notes?: string;
   isFinalized: boolean;
@@ -478,9 +480,6 @@ export interface ProductionOrder {
   createdAt: string;
   costSnapshot: number;
   
-  // Active Link for QR Code
-  activeLink?: ProductionLink;
-
   // Stages
   cuttingDetails?: CuttingDetails;
   subcontractorDetails?: SubcontractorDetails;
@@ -520,6 +519,7 @@ export interface SubcontractorOrder {
   opId: string;
   parentId?: string; // For split orders
   subcontractorName: string;
+  type: 'Interno' | 'Externo' | 'Interna' | 'Externa' | 'Retrabalho'; // Added type property
   sentDate: string;
   sentQuantity: number;
   
@@ -534,6 +534,10 @@ export interface SubcontractorOrder {
   status: 'Enviado' | 'Parcial' | 'Concluido';
   externalToken?: string; // For external access
   observations?: string; // New: Full text logs for returns
+  
+  // NEW: Detail Snapshots for better print/control
+  itemsSnapshot?: any[]; // Snapshot of sent items (grade)
+  materialsSnapshot?: any[]; // Snapshot of sent materials (consumption)
 }
 
 export interface ConsolidatedRequirement {

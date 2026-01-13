@@ -1,8 +1,10 @@
+
 import React, { useEffect, useState, useMemo } from 'react';
-import { ProductionOrder, OrderStatus, ProductionOrderItem } from '../types';
-import { MockService } from '../services/mockDb';
-import { PackageCheck, CheckCircle, Printer, Box, ArrowRight, X, MapPin, User, AlertTriangle, MoreVertical, RotateCcw, Package, Search, Filter, Grid3X3, ArrowDown, Save } from 'lucide-react';
+import { ProductionOrder, OrderStatus, ProductionOrderItem, Product } from '../types';
+import { ApiService } from '../services/api';
+import { PackageCheck, CheckCircle, Printer, Box, ArrowRight, X, MapPin, User, AlertTriangle, MoreVertical, RotateCcw, Package, Search, Filter, Grid3X3, ArrowDown, Save, CheckCircle2 } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
+import { useToast } from '../contexts/ToastContext'; // Import Toast
 
 interface DateRange {
     label: string;
@@ -21,8 +23,10 @@ const getColorStyle = (colorName: string) => {
 };
 
 export const PackingModule: React.FC = () => {
+  const { addToast } = useToast();
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [completedOps, setCompletedOps] = useState<ProductionOrder[]>([]);
+  const [products, setProducts] = useState<Product[]>([]); // Added products state
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
   const [form, setForm] = useState<any>({});
   const [errors, setErrors] = useState<Record<string, boolean>>({});
@@ -49,12 +53,26 @@ export const PackingModule: React.FC = () => {
   }, []);
 
   const loadData = async () => {
-    const allOps = await MockService.getProductionOrders();
-    // Sort recent first (createdAt descending)
-    allOps.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    try {
+        const [allOps, allProds] = await Promise.all([
+            ApiService.getProductionOrders(),
+            ApiService.getProducts()
+        ]);
+        // Sort recent first (createdAt descending)
+        allOps.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    setOps(allOps.filter(op => op.status === OrderStatus.PACKING));
-    setCompletedOps(allOps.filter(op => op.status === OrderStatus.COMPLETED && op.packingDetails?.isFinalized));
+        setOps(allOps.filter(op => op.status === OrderStatus.PACKING));
+        setCompletedOps(allOps.filter(op => op.status === OrderStatus.COMPLETED && op.packingDetails?.isFinalized));
+        setProducts(allProds);
+    } catch (err: any) {
+        addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados.' });
+    }
+  };
+
+  const getProductDisplayName = (productId: string) => {
+      const prod = products.find(p => p.id === productId);
+      if (prod) return `${prod.sku} - ${prod.name}`;
+      return productId;
   };
 
   const filteredHistory = useMemo(() => {
@@ -62,6 +80,8 @@ export const PackingModule: React.FC = () => {
       const end = new Date(dateRange.end).setHours(23,59,59,999);
 
       return completedOps.filter(op => {
+          const prodName = getProductDisplayName(op.productId);
+
           // Date Filter (Packed Date)
           const packDate = new Date(op.packingDetails?.packedDate || op.createdAt).getTime();
           const dateMatch = packDate >= start && packDate <= end;
@@ -69,12 +89,12 @@ export const PackingModule: React.FC = () => {
           // Search Filter
           const searchMatch = !searchTerm || 
               op.lotNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-              op.productId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              prodName.toLowerCase().includes(searchTerm.toLowerCase()) ||
               (op.packingDetails?.packerName || '').toLowerCase().includes(searchTerm.toLowerCase());
 
           return dateMatch && searchMatch;
       });
-  }, [completedOps, dateRange, searchTerm]);
+  }, [completedOps, dateRange, searchTerm, products]);
 
   // --- MATRIX LOGIC & CACHE ---
 
@@ -123,7 +143,7 @@ export const PackingModule: React.FC = () => {
       const maxQty = targetItem ? targetItem.quantity : 0;
 
       if (value > maxQty) {
-          alert(`ATENÇÃO: A quantidade (${value}) excede o aprovado na revisão (${maxQty}) para ${color} - ${size}.`);
+          addToast({ type: 'warning', title: 'Excedente', message: `Quantidade (${value}) maior que aprovado (${maxQty}).` });
           return;
       }
 
@@ -169,8 +189,14 @@ export const PackingModule: React.FC = () => {
       const newErrors: Record<string, boolean> = {};
       let hasError = false;
 
-      if (!form.warehouse) { newErrors.warehouse = true; hasError = true; }
-      if (!form.packerName || !form.packerName.trim()) { newErrors.packerName = true; hasError = true; }
+      if (!form.warehouse) { 
+          newErrors.warehouse = true; hasError = true; 
+          addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Selecione o depósito de destino.' });
+      }
+      if (!form.packerName || !form.packerName.trim()) { 
+          newErrors.packerName = true; hasError = true; 
+          addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Informe o responsável pela embalagem.' });
+      }
 
       setErrors(newErrors);
       if (hasError) return;
@@ -185,7 +211,6 @@ export const PackingModule: React.FC = () => {
 
       const totalPacked = itemsPacked.reduce((a,b)=>a+b.quantity, 0);
       
-      // Allow saving with 0? Probably warn.
       if (totalPacked === 0) {
           if (!confirm("Confirmar finalização com 0 peças embaladas?")) return;
       }
@@ -202,25 +227,29 @@ export const PackingModule: React.FC = () => {
           }
       };
 
-      await MockService.updateProductionOrder(selectedOp.id, updatedOp);
-      
-      // Clear Cache
-      localStorage.removeItem(`packing_cache_${selectedOp.id}`);
+      try {
+          await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
+          
+          // Clear Cache
+          localStorage.removeItem(`packing_cache_${selectedOp.id}`);
 
-      setSelectedOp(null);
-      loadData();
-      alert(`Produção Finalizada!`);
+          setSelectedOp(null);
+          loadData();
+          addToast({ type: 'success', title: 'Produção Finalizada', message: 'Lote entrou em estoque com sucesso!' });
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      }
   };
 
   const handleRevertToRevision = async (opId: string) => {
       setActiveMenuOpId(null);
       if(!confirm("Estornar para Revisão?")) return;
       try {
-          await MockService.revertPackingToRevision(opId);
+          await ApiService.revertPackingToRevision(opId);
           loadData();
-          alert('Estornado com sucesso.');
+          addToast({ type: 'info', title: 'Estorno Realizado', message: 'OP devolvida para Revisão.' });
       } catch (err: any) {
-          alert(err.message);
+          addToast({ type: 'error', title: 'Erro', message: err.message });
       }
   };
 
@@ -319,7 +348,7 @@ export const PackingModule: React.FC = () => {
                   <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" size={14}/>
                   <input 
                     className="pl-8 pr-4 py-2 border rounded-lg text-sm w-48 focus:ring-2 focus:ring-pink-500 outline-none" 
-                    placeholder="Buscar Lote..."
+                    placeholder="Buscar Lote, Produto..."
                     value={searchTerm}
                     onChange={e => setSearchTerm(e.target.value)}
                   />
@@ -342,7 +371,7 @@ export const PackingModule: React.FC = () => {
             {(activeTab === 'pending' ? ops : filteredHistory).map(op => (
               <tr key={op.id} className="hover:bg-pink-50/30 transition-colors group relative">
                 <td className="p-4 font-mono font-bold text-pink-700">{op.lotNumber}</td>
-                <td className="p-4 font-bold">{op.productId}</td>
+                <td className="p-4 font-bold">{getProductDisplayName(op.productId)}</td>
                 <td className="p-4 text-right font-bold text-gray-800">
                     {activeTab === 'pending' ? op.revisionDetails?.approvedQty : op.packingDetails?.totalPackedQty}
                 </td>
@@ -386,7 +415,7 @@ export const PackingModule: React.FC = () => {
         </table>
       </div>
 
-      {/* PACKING MODAL */}
+      {/* PACKING MODAL - INTELLIGENT MATRIX */}
       {selectedOp && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
            <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl animate-scale-in overflow-hidden max-h-[90vh] flex flex-col">
@@ -400,7 +429,7 @@ export const PackingModule: React.FC = () => {
                     <div className="mb-6 bg-pink-50 p-4 rounded-lg border border-pink-100 flex justify-between items-center">
                       <div>
                           <div className="text-sm text-pink-800 font-bold uppercase">Produto</div>
-                          <div className="text-xl font-bold">{selectedOp.productId}</div>
+                          <div className="text-xl font-bold">{getProductDisplayName(selectedOp.productId)}</div>
                       </div>
                       <div className="text-right">
                           <div className="text-sm text-pink-800 font-bold uppercase">Total Aprovado (Revisão)</div>
@@ -408,87 +437,104 @@ export const PackingModule: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* 1. REFERENCE TABLE (READ ONLY - FROM REVISION) */}
-                    <div className="mb-8 opacity-70 hover:opacity-100 transition-opacity">
-                      <h4 className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-1"><Grid3X3 size={14}/> Referência: Grade Aprovada na Revisão</h4>
-                      <div className="border rounded-lg overflow-hidden bg-gray-50">
-                          <table className="w-full text-center text-sm">
-                              <thead className="bg-gray-200 text-gray-600 font-bold">
-                                  <tr>
-                                      <th className="p-2 text-left">Cor / Tam</th>
-                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="p-2 w-12">{s}</th>)}
-                                      <th className="p-2 w-16 bg-gray-300">Total</th>
-                                  </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-200">
-                                  {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => (
-                                      <tr key={color}>
-                                          <td className="p-2 text-left font-bold flex items-center gap-2">
-                                              <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
-                                              {color}
-                                          </td>
-                                          {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => (
-                                              <td key={s} className="p-2 text-gray-500">
-                                                  {getApprovedQty(color, s)}
-                                              </td>
-                                          ))}
-                                          <td className="p-2 font-bold bg-gray-100">
-                                              {/* Calculate row total from approved logic */}
-                                              {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).reduce((acc, s) => acc + getApprovedQty(color, s), 0)}
-                                          </td>
-                                      </tr>
-                                  ))}
-                              </tbody>
-                          </table>
-                      </div>
+                    {/* REFERENCE MATRIX (APPROVED) */}
+                    <div className="mb-6 bg-pink-50/50 p-4 rounded-xl border border-pink-100">
+                        <h4 className="text-xs font-bold text-pink-800 uppercase mb-2 flex items-center gap-2"><CheckCircle2 size={14}/> Grade Aprovada (Referência)</h4>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-center text-xs opacity-80">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-pink-200">
+                                        <th className="text-left py-1">Cor</th>
+                                        {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="w-12">{s}</th>)}
+                                        <th className="w-12 font-bold">Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => {
+                                        return (
+                                            <tr key={color}>
+                                                <td className="text-left font-bold py-1 text-gray-700">{color}</td>
+                                                {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(size => {
+                                                    const qty = getApprovedQty(color, size);
+                                                    return <td key={size} className={qty > 0 ? "text-pink-700 font-bold" : "text-gray-300"}>{qty || '-'}</td>
+                                                })}
+                                                <td className="font-bold text-gray-800">
+                                                    {(selectedOp.revisionDetails?.itemsApproved || selectedOp.items).filter(i => i.color === color).reduce((a,b)=>a+b.quantity,0)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
 
-                    <div className="flex justify-center mb-6 text-pink-300"><ArrowDown size={32}/></div>
+                    <div className="flex justify-center mb-6 text-gray-300"><ArrowDown size={24}/></div>
 
                     {/* 2. INPUT MATRIX (PACKING) */}
                     <div className="mb-6">
                       <h4 className="text-sm font-bold text-pink-900 uppercase mb-2 flex items-center gap-1"><Package size={16}/> Conferência Final (Entrada de Estoque)</h4>
-                      <div className="border-2 border-pink-200 rounded-xl overflow-hidden shadow-sm">
+                      <div className="border-2 border-pink-200 rounded-xl overflow-hidden shadow-sm bg-white">
                           <table className="w-full text-center text-sm">
                               <thead className="bg-pink-100 text-pink-900 font-bold">
                                   <tr>
                                       <th className="p-3 text-left">Cor / Tam</th>
                                       {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="p-2 w-16">{s}</th>)}
-                                      <th className="p-3 w-20 bg-pink-200">Total</th>
+                                      <th className="p-3 w-20 bg-pink-200 border-l border-pink-300">Total</th>
                                   </tr>
                               </thead>
-                              <tbody className="divide-y divide-pink-50 bg-white">
-                                  {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => (
-                                      <tr key={color}>
-                                          <td className="p-3 text-left font-bold flex items-center gap-2">
-                                              <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
-                                              {color}
-                                          </td>
-                                          {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => {
-                                              const max = getApprovedQty(color, s);
-                                              const current = packedMatrix[color]?.[s] || 0;
-                                              const isFull = current === max;
-                                              const isOver = current > max;
+                              <tbody className="divide-y divide-pink-50">
+                                  {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => {
+                                      const rowTotal = Object.values(packedMatrix[color] || {}).reduce((a:number,b:number)=>a+b,0);
+                                      return (
+                                          <tr key={color} className="hover:bg-pink-50">
+                                              <td className="p-3 text-left font-bold flex items-center gap-2">
+                                                  <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
+                                                  {color}
+                                              </td>
+                                              {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => {
+                                                  const max = getApprovedQty(color, s);
+                                                  const current = packedMatrix[color]?.[s] || 0;
+                                                  const isFull = current === max;
+                                                  const isOver = current > max;
 
-                                              return (
-                                                  <td key={s} className="p-2">
-                                                      <input 
-                                                        type="number"
-                                                        className={`w-full text-center font-bold border-b-2 outline-none p-1 focus:bg-pink-50 transition-colors
-                                                            ${isOver ? 'border-red-500 text-red-600 bg-red-50' : isFull ? 'border-green-500 text-green-700 bg-green-50' : 'border-gray-200'}
-                                                        `}
-                                                        value={current === 0 ? '' : current}
-                                                        placeholder="0"
-                                                        onChange={e => updateMatrix(color, s, Number(e.target.value))}
-                                                      />
-                                                  </td>
-                                              );
-                                          })}
-                                          <td className="p-3 font-bold bg-pink-50 text-pink-800">
-                                              {Object.values(packedMatrix[color] || {}).reduce((a: number,b: number)=>a+b,0)}
+                                                  return (
+                                                      <td key={s} className="p-1">
+                                                          {max > 0 ? (
+                                                              <div className="relative">
+                                                                  <input 
+                                                                    type="number"
+                                                                    className={`w-full text-center font-bold border rounded p-1.5 outline-none transition-colors
+                                                                        ${isOver ? 'bg-red-50 border-red-300 text-red-600' : isFull ? 'bg-green-50 border-green-300 text-green-700' : 'bg-white border-gray-200 text-gray-900 focus:ring-2 focus:ring-pink-200 focus:border-pink-400'}
+                                                                    `}
+                                                                    value={current === 0 ? '' : current}
+                                                                    placeholder="0"
+                                                                    onChange={e => updateMatrix(color, s, Number(e.target.value))}
+                                                                  />
+                                                                  <div className="text-[9px] text-gray-400 mt-0.5 text-center">Max: {max}</div>
+                                                              </div>
+                                                          ) : <span className="text-gray-200 text-xs">-</span>}
+                                                      </td>
+                                                  );
+                                              })}
+                                              <td className="p-3 font-bold bg-pink-50 text-pink-800 border-l border-pink-100">
+                                                  {rowTotal}
+                                              </td>
+                                          </tr>
+                                      )
+                                  })}
+                                  {/* Grand Total */}
+                                  <tr className="bg-pink-50 font-bold border-t-2 border-pink-200 text-pink-900">
+                                      <td className="p-3 text-left">TOTAL GERAL</td>
+                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => (
+                                          <td key={s} className="p-3">
+                                              {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).reduce((acc, c) => acc + (packedMatrix[c]?.[s] || 0), 0)}
                                           </td>
-                                      </tr>
-                                  ))}
+                                      ))}
+                                      <td className="p-3 text-lg border-l border-pink-300">
+                                          {Object.values(packedMatrix).reduce((acc, sizes) => acc + Object.values(sizes).reduce((a,b)=>a+b,0), 0)}
+                                      </td>
+                                  </tr>
                               </tbody>
                           </table>
                       </div>
@@ -515,7 +561,7 @@ export const PackingModule: React.FC = () => {
                         <div>
                             <label className="block text-sm font-bold text-gray-700 mb-1 flex items-center gap-1"><MapPin size={14}/> Depósito de Destino <span className="text-red-500">*</span></label>
                             <select 
-                                className={`w-full border rounded p-3 bg-white ${errors.warehouse ? 'border-red-500 ring-2 ring-red-200' : 'border-pink-300 focus:ring-pink-500'}`}
+                                className={`w-full border rounded p-3 bg-white ${errors.warehouse ? 'border-red-500 ring-2 ring-red-100 bg-red-50' : 'border-pink-300 focus:ring-pink-500'}`}
                                 value={form.warehouse || ''}
                                 onChange={e => {
                                     setForm({...form, warehouse: e.target.value});
@@ -525,12 +571,13 @@ export const PackingModule: React.FC = () => {
                                 <option value="">Selecione o local...</option>
                                 {warehouses.map(w => <option key={w} value={w}>{w}</option>)}
                             </select>
+                            {errors.warehouse && <p className="text-xs text-red-500 mt-1">Selecione um local.</p>}
                         </div>
 
                         <div>
                             <label className="block text-sm font-bold text-gray-700 mb-1 flex items-center gap-1"><User size={14}/> Responsável <span className="text-red-500">*</span></label>
                             <input 
-                                className={`w-full border rounded p-3 ${errors.packerName ? 'border-red-500 ring-2 ring-red-200' : ''}`}
+                                className={`w-full border rounded p-3 ${errors.packerName ? 'border-red-500 ring-2 ring-red-100 bg-red-50' : ''}`}
                                 placeholder="Quem conferiu e embalou?"
                                 value={form.packerName || ''}
                                 onChange={e => {
@@ -538,6 +585,7 @@ export const PackingModule: React.FC = () => {
                                     setErrors({...errors, packerName: false});
                                 }}
                             />
+                            {errors.packerName && <p className="text-xs text-red-500 mt-1">Campo obrigatório.</p>}
                         </div>
                     </div>
                </div>

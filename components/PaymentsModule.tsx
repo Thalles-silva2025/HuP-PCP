@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
 import { SubcontractorOrder, ProductionOrder, Partner } from '../types';
-import { MockService } from '../services/mockDb';
+import { ApiService } from '../services/api';
 import { 
   DollarSign, CheckCircle2, Search, Filter, 
   Wallet, AlertCircle, Clock, ChevronDown, 
@@ -69,8 +69,8 @@ export const PaymentsModule: React.FC = () => {
     setLoading(true);
     // Fetch real generated payments from DB (Simulation + User Actions)
     const [dbPayments, partners] = await Promise.all([
-        MockService.getPayments(),
-        MockService.getPartners()
+        ApiService.getPayments(),
+        ApiService.getPartners()
     ]);
 
     setPartnersList(partners);
@@ -237,7 +237,7 @@ export const PaymentsModule: React.FC = () => {
       <div className="flex justify-between items-end mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Wallet className="text-green-600" /> Contas a Pagar (Serviços)
+            <span title="Carteira"><Wallet className="text-green-600" /></span> Contas a Pagar (Serviços)
           </h1>
           <p className="text-gray-500 text-sm mt-1">Gestão financeira de facções e prestadores de serviço terceirizados.</p>
         </div>
@@ -254,7 +254,7 @@ export const PaymentsModule: React.FC = () => {
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'OVERDUE' ? 'ring-2 ring-red-500 border-red-500' : 'border-red-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-red-50 text-red-600 rounded-lg"><AlertCircle size={20}/></div>
+                  <div className="p-2 bg-red-50 text-red-600 rounded-lg"><span title="Alerta"><AlertCircle size={20}/></span></div>
                   <span className="text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded-full">{stats.overdueCount} títulos</span>
               </div>
               <div className="text-gray-500 text-xs font-bold uppercase">Vencido (Atrasado)</div>
@@ -267,7 +267,7 @@ export const PaymentsModule: React.FC = () => {
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'TODAY' ? 'ring-2 ring-blue-500 border-blue-500' : 'border-blue-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><CalendarDays size={20}/></div>
+                  <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><span title="Calendário"><CalendarDays size={20}/></span></div>
                   <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-full">{stats.todayCount} títulos</span>
               </div>
               <div className="text-gray-500 text-xs font-bold uppercase">Vence Hoje</div>
@@ -280,7 +280,7 @@ export const PaymentsModule: React.FC = () => {
             className="bg-white p-5 rounded-xl border-l-4 border-gray-300 shadow-sm cursor-pointer transition-all hover:shadow-md"
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><Clock size={20}/></div>
+                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><span title="Relógio"><Clock size={20}/></span></div>
                   <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">{stats.futureCount} títulos</span>
               </div>
               <div className="text-gray-500 text-xs font-bold uppercase">A Vencer (Futuro)</div>
@@ -293,7 +293,7 @@ export const PaymentsModule: React.FC = () => {
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'PAID' ? 'ring-2 ring-green-500 border-green-500' : 'border-green-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-green-50 text-green-600 rounded-lg"><CheckCircle2 size={20}/></div>
+                  <div className="p-2 bg-green-50 text-green-600 rounded-lg"><span title="Confirmado"><CheckCircle2 size={20}/></span></div>
                   <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">{stats.paidCount} pagos</span>
               </div>
               <div className="text-gray-500 text-xs font-bold uppercase">Total Pago</div>
@@ -306,7 +306,7 @@ export const PaymentsModule: React.FC = () => {
           <div className="flex flex-col lg:flex-row gap-4 flex-1">
               {/* Search */}
               <div className="relative w-full lg:w-64">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18}/>
+                  <span title="Busca" className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"><Search size={18}/></span>
                   <input 
                     type="text" 
                     placeholder="Buscar Ref, OP ou Parceiro..."
@@ -329,7 +329,7 @@ export const PaymentsModule: React.FC = () => {
                       <option value="TODAY">Vence Hoje</option>
                       <option value="PAID">Pagos</option>
                   </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" size={16}/>
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"><ChevronDown size={16}/></span>
               </div>
 
               {/* Partner Dropdown */}
@@ -344,7 +344,7 @@ export const PaymentsModule: React.FC = () => {
                           <option key={p.name} value={p.name}>{p.name}</option>
                       ))}
                   </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" size={16}/>
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"><ChevronDown size={16}/></span>
               </div>
 
               {/* Modern Date Picker */}
@@ -365,7 +365,7 @@ export const PaymentsModule: React.FC = () => {
                   <Filter size={18}/>
               </button>
               <button className="flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold text-gray-600 hover:bg-gray-50">
-                  <Download size={16}/> Exportar
+                  <span title="Exportar"><Download size={16}/></span> Exportar
               </button>
           </div>
       </div>
@@ -393,9 +393,9 @@ export const PaymentsModule: React.FC = () => {
                           <tr key={item.id} className={`hover:bg-gray-50 transition-colors ${item.isOverdue ? 'bg-red-50/30' : ''}`}>
                               <td className="p-4">
                                   {isPaid ? (
-                                      <div title="Pago"><CheckCircle2 size={18} className="text-green-500"/></div>
+                                      <span title="Pago"><CheckCircle2 size={18} className="text-green-500" /></span>
                                   ) : item.isOverdue ? (
-                                      <div title={`Vencido há ${item.daysOverdue} dias`}><AlertCircle size={18} className="text-red-500"/></div>
+                                      <span title={`Vencido há ${item.daysOverdue} dias`}><AlertCircle size={18} className="text-red-500" /></span>
                                   ) : (
                                       <div className="w-4 h-4 rounded-full border-2 border-gray-300" title="Aberto"></div>
                                   )}
@@ -429,7 +429,7 @@ export const PaymentsModule: React.FC = () => {
                                         className="bg-green-600 hover:bg-green-700 text-white p-2 rounded-lg shadow-sm transition-colors"
                                         title="Realizar Pagamento"
                                       >
-                                          <Banknote size={18}/>
+                                          <span title="Pagar"><Banknote size={18}/></span>
                                       </button>
                                   )}
                                   {isPaid && (
@@ -451,7 +451,7 @@ export const PaymentsModule: React.FC = () => {
           <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in">
                   <div className="bg-green-600 p-4 text-white flex justify-between items-center">
-                      <h3 className="font-bold flex items-center gap-2"><DollarSign/> Baixar Título</h3>
+                      <h3 className="font-bold flex items-center gap-2"><span title="Pagamento"><DollarSign/></span> Baixar Título</h3>
                       <button onClick={() => setIsPaymentModalOpen(false)} className="hover:bg-green-700 p-1 rounded"><X size={20}/></button>
                   </div>
                   <div className="p-6 space-y-5">
@@ -503,7 +503,7 @@ export const PaymentsModule: React.FC = () => {
                         onClick={handleConfirmPayment} 
                         className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 shadow-lg flex justify-center items-center gap-2 mt-4"
                       >
-                          <CheckCircle2 size={18}/> Confirmar Baixa
+                          <span title="Confirmar"><CheckCircle2 size={18}/></span> Confirmar Baixa
                       </button>
                   </div>
               </div>
