@@ -1,36 +1,19 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area 
 } from 'recharts';
 import { 
   AlertCircle, Clock, CheckCircle2, Factory, TrendingUp, DollarSign, 
-  ShoppingBag, AlertTriangle, ArrowRight, ChevronDown, PackageX, Calendar, Filter, Target, PackageCheck, Flame
+  ShoppingBag, AlertTriangle, ArrowRight, ChevronDown, PackageX, Calendar, Filter, Target, PackageCheck, Flame, Loader2
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { ProductionOrder, OrderStatus, Material, PaymentRecord, Product, ProductionGoal } from '../types';
 import { useNavigate } from 'react-router-dom';
-
-// ... (Resto do arquivo, apenas alterando as chamadas MockService.* para ApiService.*)
+import { useQuery } from '@tanstack/react-query';
 
 // --- TYPES ---
 type DashboardView = 'overview' | 'delayed' | 'efficiency' | 'wip';
-
-interface DashboardStats {
-  openOps: number;
-  delayedOps: number;
-  delayedPieces: number;
-  avgLeadTime: number;
-  efficiencyRate: number;
-  totalRevenuePotential: number;
-}
-
-interface GoalStats {
-    target: number;
-    realized: number;
-    percent: number;
-    monthLabel: string;
-}
 
 interface DateRange {
     label: string;
@@ -42,7 +25,6 @@ interface DateRange {
 export const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const [activeView, setActiveView] = useState<DashboardView>('overview');
-  const [loading, setLoading] = useState(true);
   
   // Date Filter State
   const [dateRange, setDateRange] = useState<DateRange>({
@@ -52,78 +34,50 @@ export const Dashboard: React.FC = () => {
       end: new Date()
   });
 
-  // Data State
-  const [allOps, setAllOps] = useState<ProductionOrder[]>([]);
-  const [filteredOps, setFilteredOps] = useState<ProductionOrder[]>([]);
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [payments, setPayments] = useState<PaymentRecord[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [goals, setGoals] = useState<ProductionGoal[]>([]);
-  
-  // Computed State
-  const [stats, setStats] = useState<DashboardStats>({
-    openOps: 0, delayedOps: 0, delayedPieces: 0, avgLeadTime: 0, efficiencyRate: 0, totalRevenuePotential: 0
+  // --- DATA FETCHING (REACT QUERY) ---
+  const { data: allOps = [], isLoading: loadingOps } = useQuery({
+    queryKey: ['productionOrders'],
+    queryFn: ApiService.getProductionOrders
   });
-  const [goalStats, setGoalStats] = useState<GoalStats>({ target: 0, realized: 0, percent: 0, monthLabel: '-' });
-  const [urgentMaterials, setUrgentMaterials] = useState<{material: Material, missing: number}[]>([]);
-  const [todaysPayments, setTodaysPayments] = useState<PaymentRecord[]>([]);
-  const [finishingPriority, setFinishingPriority] = useState<any[]>([]);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  const { data: materials = [] } = useQuery({
+    queryKey: ['materials'],
+    queryFn: ApiService.getMaterials
+  });
 
-  useEffect(() => {
-      filterDataAndCalc();
-  }, [dateRange, allOps]);
+  const { data: payments = [] } = useQuery({
+    queryKey: ['payments'],
+    queryFn: ApiService.getPayments
+  });
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-        const [ops, mats, pay, prods, prodGoals] = await Promise.all([
-          ApiService.getProductionOrders(),
-          ApiService.getMaterials(),
-          ApiService.getPayments(),
-          ApiService.getProducts(),
-          ApiService.getProductionGoals()
-        ]);
+  const { data: products = [] } = useQuery({
+    queryKey: ['products'],
+    queryFn: ApiService.getProducts
+  });
 
-        setAllOps(ops);
-        setMaterials(mats);
-        setPayments(pay);
-        setProducts(prods);
-        setGoals(prodGoals);
-        
-        calculateGoalStats(ops, prodGoals);
-    } catch (error) {
-        console.error("Erro ao carregar dashboard:", error);
-    } finally {
-        setLoading(false);
-    }
-  };
+  const { data: goals = [] } = useQuery({
+    queryKey: ['productionGoals'],
+    queryFn: ApiService.getProductionGoals
+  });
 
-  const calculateGoalStats = (ops: ProductionOrder[], goals: ProductionGoal[]) => {
-      // Logic: Find the "Current Context Date". 
-      // If we have data in the future (2025), use the latest OP date as "Current".
-      // Otherwise use actual Today.
+  // --- COMPUTED STATE (useMemo instead of useEffect to prevent loops) ---
+
+  // 1. Goal Statistics
+  const goalStats = useMemo(() => {
       let refDate = new Date();
-      const completedOps = ops.filter(o => o.status === OrderStatus.COMPLETED && o.packingDetails?.packedDate);
+      const completedOps = allOps.filter(o => o.status === OrderStatus.COMPLETED && o.packingDetails?.packedDate);
       
       if (completedOps.length > 0) {
           const maxDateStr = completedOps.reduce((max, op) => op.packingDetails!.packedDate! > max ? op.packingDetails!.packedDate! : max, '');
           const maxDate = new Date(maxDateStr);
-          if (maxDate > refDate) {
-              refDate = maxDate; // Use simulation date
-          }
+          if (maxDate > refDate) refDate = maxDate; 
       }
 
       const monthKey = `${refDate.getFullYear()}-${(refDate.getMonth() + 1).toString().padStart(2, '0')}`;
       const monthLabel = refDate.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
 
-      // 1. Get Target
       const target = goals.find(g => g.month === monthKey)?.targetQuantity || 0;
 
-      // 2. Get Realized
       const realized = completedOps
         .filter(op => {
             const d = new Date(op.packingDetails!.packedDate!);
@@ -131,16 +85,115 @@ export const Dashboard: React.FC = () => {
         })
         .reduce((sum, op) => sum + op.quantityTotal, 0);
 
-      setGoalStats({
+      return {
           target,
           realized,
           percent: target > 0 ? Math.round((realized / target) * 100) : 0,
           monthLabel
-      });
-  };
+      };
+  }, [allOps, goals]);
 
-  // ... (Resto do arquivo mantém a mesma lógica, pois os dados agora vêm do ApiService)
-  // ... (Mantenha o restante do código igual, apenas substitua MockService por ApiService se houver outras chamadas)
+  // 2. Filtered Ops by Date Range
+  const filteredOps = useMemo(() => {
+      const rangeStart = dateRange.start.getTime();
+      const rangeEnd = dateRange.end.getTime();
+
+      return allOps.filter(op => {
+          const d = new Date(op.createdAt).getTime();
+          return d >= rangeStart && d <= rangeEnd;
+      });
+  }, [allOps, dateRange]);
+
+  // 3. General Dashboard Metrics
+  const dashboardMetrics = useMemo(() => {
+      const today = new Date();
+      today.setHours(0,0,0,0);
+
+      // Active & Delayed
+      const activeOps = allOps.filter(o => o.status !== OrderStatus.COMPLETED && o.status !== OrderStatus.CANCELLED && o.status !== OrderStatus.DRAFT);
+      const delayed = activeOps.filter(o => new Date(o.dueDate) < today);
+      const delayedPcs = delayed.reduce((a,b) => a + b.quantityTotal, 0);
+
+      // Lead Time (Based on filtered history)
+      const completedInPeriod = filteredOps.filter(o => o.status === OrderStatus.COMPLETED);
+      let totalDays = 0;
+      completedInPeriod.forEach(o => {
+          const start = new Date(o.startDate).getTime();
+          const end = new Date(o.packingDetails?.packedDate || new Date().toISOString()).getTime();
+          totalDays += (end - start) / (1000 * 3600 * 24);
+      });
+      const avgLead = completedInPeriod.length ? totalDays / completedInPeriod.length : 0;
+
+      // Efficiency/Quality
+      let totalQuality = 0;
+      let countQuality = 0;
+      filteredOps.forEach(o => {
+          if (o.revisionDetails) {
+              const total = o.revisionDetails.approvedQty + o.revisionDetails.reworkQty + o.revisionDetails.rejectedQty;
+              if (total > 0) {
+                  totalQuality += (o.revisionDetails.approvedQty / total);
+                  countQuality++;
+              }
+          }
+      });
+      const efficiency = countQuality ? (totalQuality / countQuality) * 100 : 100;
+
+      // Revenue Potential
+      const totalRevenuePotential = activeOps.reduce((acc, op) => {
+          const p = products.find(x => x.id === op.productId);
+          // Safe access to price
+          const price = p?.techPacks?.[0]?.suggestedPrice || 0;
+          return acc + (op.quantityTotal * price);
+      }, 0);
+
+      // Urgent Materials
+      const criticalMats = materials
+          .filter(m => m.currentStock < 100)
+          .map(m => ({ material: m, missing: 100 - m.currentStock }))
+          .slice(0, 5);
+
+      // Today's Payments
+      const duePayments = payments.filter(p => {
+          const d = new Date(p.date);
+          d.setHours(0,0,0,0);
+          return p.status !== 'Pago' && d <= today;
+      });
+
+      // Finishing Priority
+      const finishingOps = allOps.filter(o => o.status === OrderStatus.QUALITY_CONTROL || o.status === OrderStatus.PACKING);
+      const groups: Record<string, number> = { 'Hype': 0, 'Vende Tudo': 0, 'Vende Bem': 0, 'Normal': 0 };
+      
+      finishingOps.forEach(op => {
+          const p = products.find(x => x.id === op.productId);
+          const tp = p?.techPacks.find(t => t.version === op.techPackVersion);
+          const type = tp?.salesType || 'Normal';
+          if(groups[type] !== undefined) groups[type] += op.quantityTotal;
+      });
+
+      const priorityData = [
+          { name: 'Hype', value: groups['Hype'], color: '#9333ea' },
+          { name: 'Vende Tudo', value: groups['Vende Tudo'], color: '#f97316' },
+          { name: 'Vende Bem', value: groups['Vende Bem'], color: '#3b82f6' },
+          { name: 'Normal', value: groups['Normal'], color: '#94a3b8' }
+      ].filter(g => g.value > 0);
+
+      return {
+          stats: {
+              openOps: activeOps.length,
+              delayedOps: delayed.length,
+              delayedPieces: delayedPcs,
+              avgLeadTime: Math.round(avgLead),
+              efficiencyRate: parseFloat(efficiency.toFixed(1)) || 0, // Prevent NaN
+              totalRevenuePotential
+          },
+          urgentMaterials: criticalMats,
+          todaysPayments: duePayments,
+          finishingPriority: priorityData
+      };
+  }, [allOps, filteredOps, materials, payments, products]);
+
+  // Destructure for easier usage in render
+  const { stats, urgentMaterials, finishingPriority } = dashboardMetrics;
 
   const handleRangeChange = (days: number | 'custom') => {
       const end = new Date();
@@ -161,106 +214,7 @@ export const Dashboard: React.FC = () => {
       });
   };
 
-  const filterDataAndCalc = () => {
-      const rangeStart = dateRange.start.getTime();
-      const rangeEnd = dateRange.end.getTime();
-
-      const relevantHistoryOps = allOps.filter(op => {
-          const d = new Date(op.createdAt).getTime();
-          return d >= rangeStart && d <= rangeEnd;
-      });
-      setFilteredOps(relevantHistoryOps);
-
-      calculateMetrics(allOps, relevantHistoryOps, materials, payments, products);
-  };
-
-  const calculateMetrics = (
-      allOps: ProductionOrder[], 
-      historyOps: ProductionOrder[], 
-      mats: Material[], 
-      pay: PaymentRecord[], 
-      prods: Product[]
-  ) => {
-      const today = new Date();
-      today.setHours(0,0,0,0);
-
-      const activeOps = allOps.filter(o => o.status !== OrderStatus.COMPLETED && o.status !== OrderStatus.CANCELLED && o.status !== OrderStatus.DRAFT);
-      
-      const delayed = activeOps.filter(o => {
-          const due = new Date(o.dueDate);
-          return due < today;
-      });
-
-      const delayedPcs = delayed.reduce((a,b) => a + b.quantityTotal, 0);
-
-      const completedInPeriod = historyOps.filter(o => o.status === OrderStatus.COMPLETED);
-      let totalDays = 0;
-      completedInPeriod.forEach(o => {
-          const start = new Date(o.startDate).getTime();
-          const end = new Date(o.packingDetails?.packedDate || new Date().toISOString()).getTime();
-          totalDays += (end - start) / (1000 * 3600 * 24);
-      });
-      const avgLead = completedInPeriod.length ? totalDays / completedInPeriod.length : 0;
-
-      let totalQuality = 0;
-      let countQuality = 0;
-      historyOps.forEach(o => {
-          if (o.revisionDetails) {
-              const total = o.revisionDetails.approvedQty + o.revisionDetails.reworkQty + o.revisionDetails.rejectedQty;
-              if (total > 0) {
-                  totalQuality += (o.revisionDetails.approvedQty / total);
-                  countQuality++;
-              }
-          }
-      });
-      const efficiency = countQuality ? (totalQuality / countQuality) * 100 : 100;
-
-      setStats({
-          openOps: activeOps.length,
-          delayedOps: delayed.length,
-          delayedPieces: delayedPcs,
-          avgLeadTime: Math.round(avgLead),
-          efficiencyRate: parseFloat(efficiency.toFixed(1)),
-          totalRevenuePotential: activeOps.reduce((acc, op) => {
-              const p = prods.find(x => x.id === op.productId);
-              const price = p?.techPacks[0]?.suggestedPrice || 0;
-              return acc + (op.quantityTotal * price);
-          }, 0)
-      });
-
-      const criticalMats: {material: Material, missing: number}[] = [];
-      mats.forEach(m => {
-          if (m.currentStock < 100) { 
-             criticalMats.push({ material: m, missing: 100 - m.currentStock });
-          }
-      });
-      setUrgentMaterials(criticalMats.slice(0, 5));
-
-      const due = pay.filter(p => {
-          const d = new Date(p.date);
-          d.setHours(0,0,0,0);
-          return p.status !== 'Pago' && d <= today;
-      });
-      setTodaysPayments(due);
-
-      const finishingOps = allOps.filter(o => o.status === OrderStatus.QUALITY_CONTROL || o.status === OrderStatus.PACKING);
-      const groups: Record<string, number> = { 'Hype': 0, 'Vende Tudo': 0, 'Vende Bem': 0, 'Normal': 0 };
-      
-      finishingOps.forEach(op => {
-          const p = prods.find(x => x.id === op.productId);
-          const tp = p?.techPacks.find(t => t.version === op.techPackVersion);
-          const type = tp?.salesType || 'Normal';
-          if(groups[type] !== undefined) groups[type] += op.quantityTotal;
-      });
-
-      setFinishingPriority([
-          { name: 'Hype', value: groups['Hype'], color: '#9333ea' },
-          { name: 'Vende Tudo', value: groups['Vende Tudo'], color: '#f97316' },
-          { name: 'Vende Bem', value: groups['Vende Bem'], color: '#3b82f6' },
-          { name: 'Normal', value: groups['Normal'], color: '#94a3b8' }
-      ].filter(g => g.value > 0));
-  };
-
+  // --- CHART DATA GENERATORS ---
   const getWipData = () => {
       const stages = {
           [OrderStatus.PLANNED]: 0,
@@ -298,6 +252,7 @@ export const Dashboard: React.FC = () => {
       }));
   };
 
+  // --- UI COMPONENTS ---
   const StatCard = ({ title, value, sub, icon: Icon, color, activeKey, onClick }: any) => (
     <div 
         onClick={() => onClick(activeKey)}
@@ -319,7 +274,11 @@ export const Dashboard: React.FC = () => {
             </div>
             <p className="text-gray-500 text-sm font-bold uppercase tracking-wide">{title}</p>
         </div>
-        <h3 className="text-3xl font-bold text-gray-800 tracking-tight">{value}</h3>
+        {loadingOps ? (
+            <div className="h-8 w-24 bg-gray-200 rounded animate-pulse"/>
+        ) : (
+            <h3 className="text-3xl font-bold text-gray-800 tracking-tight">{value}</h3>
+        )}
         <p className={`text-xs mt-2 font-medium flex items-center gap-1 ${sub.includes('+') || sub.includes('Crítico') ? 'text-red-500' : 'text-green-500'}`}>
           {sub.includes('Crítico') ? <AlertTriangle size={12}/> : <TrendingUp size={12}/>}
           {sub}
@@ -341,7 +300,8 @@ export const Dashboard: React.FC = () => {
             <p className="text-gray-500">Visão estratégica da operação.</p>
             </div>
             <div className="flex items-center gap-2 text-sm text-gray-500 bg-white px-4 py-2 rounded-full border shadow-sm">
-                <Clock size={16}/> Última atualização: {new Date().toLocaleTimeString()}
+                {loadingOps ? <Loader2 className="animate-spin" size={16}/> : <CheckCircle2 size={16} className="text-green-500"/>}
+                {loadingOps ? 'Atualizando dados...' : 'Dados atualizados'}
             </div>
         </div>
 

@@ -1,13 +1,11 @@
 
-// ... existing imports ...
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
-import { MockService } from '../services/mockDb';
 import { ApiService } from '../services/api';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User } from 'lucide-react';
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
-// ... existing helper functions ...
 // Helper for Color
 const getColorStyle = (colorName: string) => {
     const map: any = {
@@ -112,15 +110,29 @@ const SizeColorMatrix = ({ items, sizes }: { items: any[], sizes: string[] }) =>
 export const ProductionOrderList: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const queryClient = useQueryClient();
   const highlightOpId = (location.state as any)?.highlightOpId;
 
-  const [ops, setOps] = useState<ProductionOrder[]>([]);
+  // --- REACT QUERY ---
+  const { data: rawOps = [], isLoading: loadingOps, refetch: refetchOps } = useQuery({
+    queryKey: ['productionOrders'],
+    queryFn: ApiService.getProductionOrders
+  });
+
+  const { data: products = [], refetch: refetchProds } = useQuery({
+    queryKey: ['products'],
+    queryFn: ApiService.getProducts
+  });
+
+  // Derived sorted OPs
+  const ops = useMemo(() => {
+      return [...rawOps].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [rawOps]);
+
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
   
   // NEW: State to hold children OPs when viewing a batch
   const [batchChildren, setBatchChildren] = useState<ProductionOrder[]>([]);
-
-  const [products, setProducts] = useState<Product[]>([]);
   
   // Tab State
   const [activeTab, setActiveTab] = useState<'summary' | 'revision' | 'packing'>('summary');
@@ -145,30 +157,21 @@ export const ProductionOrderList: React.FC = () => {
   const [revisionForm, setRevisionForm] = useState<any>({});
   const [packingForm, setPackingForm] = useState<any>({});
 
+  // Auto-open logic if coming from Reports
   useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
-    const [orders, prods] = await Promise.all([
-        ApiService.getProductionOrders(),
-        ApiService.getProducts()
-    ]);
-    
-    // Sort recent first (Force desc sort by createdAt)
-    orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    setOps(orders);
-    setProducts(prods);
-
-    // Auto-open logic if coming from Reports
-    if (highlightOpId) {
-        const targetOp = orders.find(o => o.id === highlightOpId);
+    if (highlightOpId && ops.length > 0) {
+        const targetOp = ops.find(o => o.id === highlightOpId);
         if (targetOp) {
             openDetails(targetOp);
-            window.history.replaceState({}, document.title);
+            // Clear the location state to prevent loop on updates
+            navigate(location.pathname, { replace: true, state: {} });
         }
     }
+  }, [highlightOpId, ops, location.pathname, navigate]);
+
+  const refreshAll = () => {
+      refetchOps();
+      refetchProds();
   };
 
   const toggleGroup = (batchId: string) => {
@@ -315,8 +318,8 @@ export const ProductionOrderList: React.FC = () => {
           }
       };
       await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
+      queryClient.invalidateQueries({ queryKey: ['productionOrders'] }); // Force refresh
       setSelectedOp(updatedOp);
-      loadData();
       alert('Revisão registrada! OP movida para Embalagem.');
       setActiveTab('packing');
   };
@@ -333,8 +336,10 @@ export const ProductionOrderList: React.FC = () => {
           }
       };
       await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
+      queryClient.invalidateQueries({ queryKey: ['productionOrders'] }); // Force refresh
+      queryClient.invalidateQueries({ queryKey: ['finishedGoods'] }); // Update Inventory too
+      
       setSelectedOp(updatedOp);
-      loadData();
       alert('Ordem de Produção Finalizada e Estoque Atualizado Automaticamente!');
   };
 
@@ -383,6 +388,12 @@ export const ProductionOrderList: React.FC = () => {
           <p className="text-gray-500 text-sm">Gerenciamento agrupado por Lote de Produção.</p>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={refreshAll}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 text-gray-600 rounded-lg font-medium hover:bg-gray-50"
+          >
+            <RefreshCw size={18} className={loadingOps ? 'animate-spin' : ''}/>
+          </button>
           <button 
             onClick={() => navigate('/ops/new')}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 shadow-md"

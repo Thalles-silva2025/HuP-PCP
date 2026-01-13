@@ -4,23 +4,39 @@ import { Material, Product, FinishedProductStock, WIPItem, ProductStatus, Materi
 import { ApiService } from '../services/api';
 import { 
   Package, Search, Plus, Download, Factory, 
-  Layers, CheckCircle2, AlertTriangle, XCircle, History, MoreVertical, Lock, ClipboardList, RotateCcw, Truck, Scissors, FileText, ClipboardCheck, Calendar, Archive, FileOutput, Printer, X
+  Layers, CheckCircle2, AlertTriangle, XCircle, History, MoreVertical, Lock, ClipboardList, RotateCcw, Truck, Scissors, FileText, ClipboardCheck, Calendar, Archive, FileOutput, Printer, X, RefreshCw
 } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 export const InventoryModule: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'raw' | 'finished' | 'wip'>('finished');
   
-  // Data State
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [finishedStock, setFinishedStock] = useState<FinishedProductStock[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [wipItems, setWipItems] = useState<WIPItem[]>([]);
+  // --- REACT QUERY IMPLEMENTATION ---
+  const { data: materials = [], refetch: refetchMaterials } = useQuery({
+    queryKey: ['materials'],
+    queryFn: ApiService.getMaterials
+  });
+
+  const { data: finishedStock = [], refetch: refetchStock } = useQuery({
+    queryKey: ['finishedGoods'],
+    queryFn: ApiService.getFinishedGoods
+  });
+
+  const { data: products = [], refetch: refetchProducts } = useQuery({
+    queryKey: ['products'],
+    queryFn: ApiService.getProducts
+  });
+
+  const { data: wipItems = [], refetch: refetchWip } = useQuery({
+    queryKey: ['wipInventory'],
+    queryFn: ApiService.getWIPInventory
+  });
+
+  const queryClient = useQueryClient();
+
+  // Local State
   const [searchTerm, setSearchTerm] = useState('');
-  
-  // Selection State (Stock IDs)
   const [selectedStockIds, setSelectedStockIds] = useState<string[]>([]);
-  
-  // Menu State
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   // Modals State
@@ -38,28 +54,16 @@ export const InventoryModule: React.FC = () => {
   // Report Modal State
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
 
-  const loadData = async () => {
-    try {
-        const [mats, prods, finished, wip] = await Promise.all([
-          ApiService.getMaterials(),
-          ApiService.getProducts(),
-          ApiService.getFinishedGoods(),
-          ApiService.getWIPInventory()
-        ]);
-        setMaterials(mats);
-        setProducts(prods);
-        setFinishedStock(finished);
-        setWipItems(wip);
-    } catch (e) {
-        console.error("Erro ao carregar estoque:", e);
-    }
+  const refreshAll = () => {
+      refetchMaterials();
+      refetchStock();
+      refetchProducts();
+      refetchWip();
   };
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const handleOpClick = async (opId: string) => {
+    // Note: getProductionOrderById is fast, but we could also useQuery here if needed.
+    // For single item fetch on click, standard promise is okay.
     const op = await ApiService.getProductionOrderById(opId);
     if (op) {
         setSelectedOpDetail(op);
@@ -78,7 +82,8 @@ export const InventoryModule: React.FC = () => {
       if (!confirm('Tem certeza? Isso removerá o item do estoque e retornará a OP para o status de Embalagem.')) return;
       try {
           await ApiService.revertStockToPacking(id);
-          loadData();
+          queryClient.invalidateQueries({ queryKey: ['finishedGoods'] });
+          queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
           setActiveMenuId(null);
           alert('Item estornado e OP retornada para Embalagem.');
       } catch (err: any) {
@@ -89,7 +94,7 @@ export const InventoryModule: React.FC = () => {
   const handleMarkExported = async () => {
       if (selectedStockIds.length === 0) return;
       await ApiService.markStockAsExported(selectedStockIds);
-      loadData();
+      queryClient.invalidateQueries({ queryKey: ['finishedGoods'] });
       setSelectedStockIds([]);
       setIsReportModalOpen(false); // Close report modal
       setActiveMenuId(null);
@@ -345,6 +350,13 @@ export const InventoryModule: React.FC = () => {
           <p className="text-gray-500 text-sm">Controle de matéria-prima, WIP e produtos acabados.</p>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={refreshAll}
+            className="p-2 border rounded-lg hover:bg-gray-50 text-gray-600"
+            title="Atualizar"
+          >
+              <RefreshCw size={18}/>
+          </button>
           <button 
             onClick={() => {
                if(activeTab === 'raw') { setEditingMaterial({ type: MaterialType.FABRIC, unit: UnitOfMeasure.KG }); setIsMaterialModalOpen(true); }
