@@ -1,14 +1,14 @@
 
 import React, { useState, useMemo } from 'react';
 import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, AreaChart, Area 
 } from 'recharts';
 import { 
-  AlertCircle, Clock, CheckCircle2, Factory, TrendingUp, DollarSign, 
-  ShoppingBag, AlertTriangle, ArrowRight, ChevronDown, PackageX, Calendar, Filter, Target, PackageCheck, Flame, Loader2
+  AlertCircle, Clock, CheckCircle2, Factory, TrendingUp, 
+  ShoppingBag, AlertTriangle, ArrowRight, Calendar, Filter, Target, PackageCheck, Flame, Loader2, PackageX
 } from 'lucide-react';
 import { ApiService } from '../services/api';
-import { ProductionOrder, OrderStatus, Material, PaymentRecord, Product, ProductionGoal } from '../types';
+import { OrderStatus } from '../types';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
@@ -37,7 +37,8 @@ export const Dashboard: React.FC = () => {
   // --- DATA FETCHING (REACT QUERY) ---
   const { data: allOps = [], isLoading: loadingOps } = useQuery({
     queryKey: ['productionOrders'],
-    queryFn: ApiService.getProductionOrders
+    queryFn: ApiService.getProductionOrders,
+    staleTime: 1000 * 60 * 5 // 5 minutos de cache
   });
 
   const { data: materials = [] } = useQuery({
@@ -60,7 +61,7 @@ export const Dashboard: React.FC = () => {
     queryFn: ApiService.getProductionGoals
   });
 
-  // --- COMPUTED STATE (useMemo instead of useEffect to prevent loops) ---
+  // --- COMPUTED STATE (useMemo previne Loop Infinito) ---
 
   // 1. Goal Statistics
   const goalStats = useMemo(() => {

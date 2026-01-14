@@ -1,12 +1,4 @@
 
-/**
- * 🔒 CORE AUTH CONTEXT - LOCKED
- * -----------------------------
- * Gerencia o estado global de autenticação e dados do usuário.
- * Modificado para garantir que 'loading' só seja false após tentar buscar o perfil.
- * AGORA COM AUTO-REPARO DE PERFIL E SAFETY TIMEOUT.
- */
-
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../services/supabase';
@@ -36,50 +28,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Função isolada e robusta para buscar perfil com Auto-Reparo
+  // Busca perfil simplificada e robusta
   const fetchProfile = async (userId: string, email?: string) => {
       try {
           const { data, error } = await supabase
             .from('user_profiles')
             .select('*')
             .eq('id', userId)
-            .maybeSingle();
+            .maybeSingle(); // maybeSingle evita erro se não existir
           
           if (data && data.organization_id) {
               setProfile(data as UserProfile);
               return data;
           } 
           
-          // AUTO-REPARO: Se não encontrou perfil ou falta organização
-          if (!data || !data.organization_id) {
-              console.log("AuthContext: Perfil incompleto. Tentando reparo automático...");
-              
-              // 1. Cria Org
-              const { data: newOrg } = await supabase.from('organizations').insert([{ name: 'Minha Confecção' }]).select('id').single();
-              
-              if(newOrg) {
-                  // 2. Upsert Profile
-                  const { data: newProfile } = await supabase.from('user_profiles').upsert({
-                      id: userId,
-                      email: email || '',
-                      organization_id: newOrg.id,
-                      role: 'admin',
-                      updated_at: new Date().toISOString()
-                  }).select().single();
-                  
-                  if (newProfile) {
-                      setProfile(newProfile as UserProfile);
-                      return newProfile;
-                  }
-              }
-          }
-          
-          // Fallback final
-          if (error) console.error("Erro ao buscar perfil:", error.message);
+          // Se chegou aqui, não tem perfil ou deu erro. 
+          // O Auto-Reparo deve ser feito no api.ts para não poluir o contexto
+          // Aqui apenas limpamos o perfil para o ProtectedRoute saber.
+          setProfile(null);
           return null;
 
       } catch (err) {
           console.error("Erro inesperado no fetchProfile:", err);
+          setProfile(null);
           return null;
       }
   };
@@ -87,27 +58,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     let mounted = true;
 
-    // SAFETY TIMEOUT: Força a liberação da tela de loading se o Supabase demorar mais de 6 segundos
-    // Isso evita que o app trave na tela "Conectando ao sistema..."
-    const safetyTimer = setTimeout(() => {
-        if (mounted && loading) {
-            console.warn("⚠️ Auth Init Timed Out - Forcing UI Render");
-            setLoading(false);
-        }
-    }, 6000);
-
+    // Inicialização
     const initAuth = async () => {
         try {
-            // 1. Pega a sessão atual
-            const { data: { session: currentSession }, error } = await supabase.auth.getSession();
+            const { data: { session: currentSession } } = await supabase.auth.getSession();
             
-            if (error) throw error;
-
             if (mounted) {
                 setSession(currentSession);
                 setUser(currentSession?.user ?? null);
                 
-                // 2. Se tem usuário, busca o perfil
                 if (currentSession?.user) {
                     await fetchProfile(currentSession.user.id, currentSession.user.email);
                 }
@@ -116,22 +75,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             console.error("Auth init failed:", error);
         } finally {
             if (mounted) {
+                // GARANTE QUE O LOADING SEMPRE TERMINA
                 setLoading(false);
-                clearTimeout(safetyTimer); // Cancela o timeout de segurança se tudo correu bem
             }
         }
     };
 
     initAuth();
 
-    // Listener para mudanças em tempo real (Login/Logout/Token Refresh)
+    // Listener de Mudanças
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (mounted) {
           if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
              setSession(newSession);
              setUser(newSession?.user ?? null);
-             
-             // Busca perfil imediatamente ao logar
              if (newSession?.user) {
                  await fetchProfile(newSession.user.id, newSession.user.email);
              }

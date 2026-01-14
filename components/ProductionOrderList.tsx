@@ -116,12 +116,14 @@ export const ProductionOrderList: React.FC = () => {
   // --- REACT QUERY ---
   const { data: rawOps = [], isLoading: loadingOps, refetch: refetchOps } = useQuery({
     queryKey: ['productionOrders'],
-    queryFn: ApiService.getProductionOrders
+    queryFn: ApiService.getProductionOrders,
+    staleTime: 1000 * 60 * 2 // 2 mins cache
   });
 
   const { data: products = [], refetch: refetchProds } = useQuery({
     queryKey: ['products'],
-    queryFn: ApiService.getProducts
+    queryFn: ApiService.getProducts,
+    staleTime: 1000 * 60 * 5
   });
 
   // Derived sorted OPs
@@ -163,11 +165,11 @@ export const ProductionOrderList: React.FC = () => {
         const targetOp = ops.find(o => o.id === highlightOpId);
         if (targetOp) {
             openDetails(targetOp);
-            // Clear the location state to prevent loop on updates
+            // Critical: Limpa o state para não reabrir em loop
             navigate(location.pathname, { replace: true, state: {} });
         }
     }
-  }, [highlightOpId, ops, location.pathname, navigate]);
+  }, [highlightOpId, ops, navigate, location.pathname]);
 
   const refreshAll = () => {
       refetchOps();
