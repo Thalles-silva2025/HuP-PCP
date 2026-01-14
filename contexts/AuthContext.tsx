@@ -31,21 +31,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // --- LÓGICA DE AUTO-CORREÇÃO DE PERFIL ---
   const ensureProfileExists = async (userId: string, email?: string): Promise<UserProfile | null> => {
       try {
-          // 1. Tenta buscar o perfil existente
-          const { data: existingProfile, error: fetchError } = await supabase
-            .from('user_profiles')
-            .select('*')
-            .eq('id', userId)
-            .maybeSingle();
-
-          // Se achou e tem organização, retorna sucesso
-          if (existingProfile && existingProfile.organization_id) {
-              return existingProfile as UserProfile;
-          }
-
-          console.log("⚠️ Perfil incompleto ou inexistente. Iniciando Auto-Correção...");
-
-          // 2. Se não achou, inicia o processo de criação (Auto-Healing)
           // A. Cria uma Organização Padrão
           const { data: newOrg, error: orgError } = await supabase
               .from('organizations')
@@ -84,12 +69,46 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
   };
 
-  const fetchProfile = async (userId: string, email?: string) => {
-      const data = await ensureProfileExists(userId, email);
-      if (data) {
-          setProfile(data);
-      } else {
-          // Se falhou mesmo após tentar criar, limpa o estado para evitar loops
+  /**
+   * Busca o perfil com mecanismo de RETRY (Tentativas).
+   * Isso resolve o problema do "F5" onde o token ainda não propagou.
+   */
+  const fetchProfile = async (userId: string, email?: string, retries = 3, delay = 1000) => {
+      try {
+          // 1. Tenta buscar o perfil existente
+          const { data: existingProfile, error: fetchError } = await supabase
+            .from('user_profiles')
+            .select('*')
+            .eq('id', userId)
+            .maybeSingle();
+
+          // SUCESSO: Perfil encontrado e válido
+          if (existingProfile && existingProfile.organization_id) {
+              setProfile(existingProfile as UserProfile);
+              return;
+          }
+
+          // FALHA: Se não achou, mas ainda temos tentativas (retries > 0)
+          // Isso acontece muito no Refresh da página (Race Condition do Token)
+          if (retries > 0) {
+              console.warn(`⚠️ Perfil não carregado. Tentando novamente em ${delay}ms... (Restam: ${retries})`);
+              setTimeout(() => {
+                  fetchProfile(userId, email, retries - 1, delay);
+              }, delay);
+              return; // Sai e espera a próxima tentativa
+          }
+
+          // FALHA TOTAL: Esgotaram as tentativas. Tenta criar (Auto-Healing).
+          console.log("⚠️ Perfil não encontrado após tentativas. Iniciando criação...");
+          const newProfile = await ensureProfileExists(userId, email);
+          if (newProfile) {
+              setProfile(newProfile);
+          } else {
+              setProfile(null);
+          }
+
+      } catch (err) {
+          console.error("Erro inesperado no fetchProfile:", err);
           setProfile(null);
       }
   };
@@ -99,6 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const initAuth = async () => {
         try {
+            // 1. Obtém sessão inicial
             const { data: { session: currentSession } } = await supabase.auth.getSession();
             
             if (mounted) {
@@ -106,13 +126,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 setUser(currentSession?.user ?? null);
                 
                 if (currentSession?.user) {
-                    await fetchProfile(currentSession.user.id, currentSession.user.email);
+                    // Inicia busca com 3 tentativas de resiliência
+                    await fetchProfile(currentSession.user.id, currentSession.user.email, 3, 500);
                 }
             }
         } catch (error) {
             console.error("Auth init failed:", error);
         } finally {
             if (mounted) {
+                // Apenas remove o loading geral, o fetchProfile pode continuar tentando em background
+                // Isso permite que a UI mostre 'Conectando...' sem travar
                 setLoading(false);
             }
         }
@@ -120,13 +143,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
+    // 2. Listener de Eventos (Login, Logout, Token Refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (mounted) {
-          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
              setSession(newSession);
              setUser(newSession?.user ?? null);
+             
+             // Se houve evento de login/refresh, buscamos o perfil novamente com retry
              if (newSession?.user) {
-                 await fetchProfile(newSession.user.id, newSession.user.email);
+                 // Pequeno delay para garantir que o token propagou no cliente do Supabase
+                 setTimeout(() => {
+                     fetchProfile(newSession.user.id, newSession.user.email, 2, 500);
+                 }, 100);
              }
           } else if (event === 'SIGNED_OUT') {
              setSession(null);
@@ -154,7 +183,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshProfile = async () => {
       if (user) {
-          await fetchProfile(user.id, user.email);
+          await fetchProfile(user.id, user.email, 1, 0); // Sem delay para refresh manual
       }
   };
 
