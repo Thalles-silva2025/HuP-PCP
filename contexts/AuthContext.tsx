@@ -28,37 +28,75 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Busca perfil simplificada e robusta
-  const fetchProfile = async (userId: string, email?: string) => {
+  // --- LÓGICA DE AUTO-CORREÇÃO DE PERFIL ---
+  const ensureProfileExists = async (userId: string, email?: string): Promise<UserProfile | null> => {
       try {
-          const { data, error } = await supabase
+          // 1. Tenta buscar o perfil existente
+          const { data: existingProfile, error: fetchError } = await supabase
             .from('user_profiles')
             .select('*')
             .eq('id', userId)
-            .maybeSingle(); // maybeSingle evita erro se não existir
-          
-          if (data && data.organization_id) {
-              setProfile(data as UserProfile);
-              return data;
-          } 
-          
-          // Se chegou aqui, não tem perfil ou deu erro. 
-          // O Auto-Reparo deve ser feito no api.ts para não poluir o contexto
-          // Aqui apenas limpamos o perfil para o ProtectedRoute saber.
-          setProfile(null);
-          return null;
+            .maybeSingle();
+
+          // Se achou e tem organização, retorna sucesso
+          if (existingProfile && existingProfile.organization_id) {
+              return existingProfile as UserProfile;
+          }
+
+          console.log("⚠️ Perfil incompleto ou inexistente. Iniciando Auto-Correção...");
+
+          // 2. Se não achou, inicia o processo de criação (Auto-Healing)
+          // A. Cria uma Organização Padrão
+          const { data: newOrg, error: orgError } = await supabase
+              .from('organizations')
+              .insert([{ name: 'Minha Empresa' }])
+              .select('id')
+              .single();
+
+          if (orgError) throw new Error(`Erro ao criar organização: ${orgError.message}`);
+
+          // B. Cria o Perfil vinculado
+          const newProfileData = {
+              id: userId,
+              email: email || '',
+              organization_id: newOrg.id,
+              role: 'admin',
+              company_name: 'Minha Empresa',
+              onboarding_completed: false,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+          };
+
+          const { data: createdProfile, error: profileError } = await supabase
+              .from('user_profiles')
+              .upsert(newProfileData)
+              .select('*')
+              .single();
+
+          if (profileError) throw new Error(`Erro ao criar perfil: ${profileError.message}`);
+
+          console.log("✅ Auto-Correção concluída com sucesso.");
+          return createdProfile as UserProfile;
 
       } catch (err) {
-          console.error("Erro inesperado no fetchProfile:", err);
-          setProfile(null);
+          console.error("❌ Falha crítica no AuthContext:", err);
           return null;
+      }
+  };
+
+  const fetchProfile = async (userId: string, email?: string) => {
+      const data = await ensureProfileExists(userId, email);
+      if (data) {
+          setProfile(data);
+      } else {
+          // Se falhou mesmo após tentar criar, limpa o estado para evitar loops
+          setProfile(null);
       }
   };
 
   useEffect(() => {
     let mounted = true;
 
-    // Inicialização
     const initAuth = async () => {
         try {
             const { data: { session: currentSession } } = await supabase.auth.getSession();
@@ -75,7 +113,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             console.error("Auth init failed:", error);
         } finally {
             if (mounted) {
-                // GARANTE QUE O LOADING SEMPRE TERMINA
                 setLoading(false);
             }
         }
@@ -83,7 +120,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
-    // Listener de Mudanças
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (mounted) {
           if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
