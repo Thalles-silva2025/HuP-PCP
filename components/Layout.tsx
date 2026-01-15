@@ -23,7 +23,8 @@ import {
   Target,
   LogOut,
   User as UserIcon,
-  CreditCard
+  CreditCard,
+  Sliders // New Icon for Configuration
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -41,6 +42,13 @@ interface MenuItemProps {
   subItems?: { label: string, to: string }[];
   isOpen?: boolean;
   onToggle?: () => void;
+}
+
+interface MenuItemDef {
+  icon: any;
+  label: string;
+  path: string;
+  subItems?: { label: string; to: string }[];
 }
 
 const SidebarItem: React.FC<MenuItemProps> = ({ icon: Icon, label, to, active, collapsed, subItems, isOpen, onToggle }) => {
@@ -119,21 +127,13 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
       navigate('/login');
   };
 
-  const menuItems = [
+  const menuItems: MenuItemDef[] = [
     { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
     { icon: Target, label: 'Metas de Produção', path: '/goals' },
-    { icon: Database, label: 'Cadastros', path: '/settings' },
+    { icon: Database, label: 'Cadastros Gerais', path: '/settings' }, // Renamed from "Cadastros" to be clearer
     { icon: Shirt, label: 'Fichas Técnicas', path: '/tech-packs' },
     { icon: Layers, label: 'Ordens de Produção', path: '/ops' },
-    { 
-      icon: Scissors, 
-      label: 'Sala de Corte', 
-      subItems: [
-        { label: 'Parado / Planejado', to: '/cutting?tab=planning' },
-        { label: 'Em Andamento', to: '/cutting?tab=active' },
-        { label: 'Finalizados', to: '/cutting?tab=done' },
-      ]
-    },
+    { icon: Scissors, label: 'Sala de Corte', path: '/cutting' },
     { icon: Users, label: 'Facções', path: '/subcontractors' },
     { icon: ClipboardCheck, label: 'Revisão / Qualidade', path: '/revision' },
     { icon: PackageCheck, label: 'Embalagem', path: '/packing' },
@@ -141,6 +141,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     { icon: FileText, label: 'Soma de Matéria Prima', path: '/consolidation' },
     { icon: DollarSign, label: 'Pagamentos', path: '/payments' },
     { icon: BarChart3, label: 'Relatórios', path: '/reports' },
+    { icon: Sliders, label: 'Configurações', path: '/configuration' }, // New Module
   ];
 
   // Helper para obter iniciais
@@ -178,7 +179,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
               icon={item.icon} 
               label={item.label} 
               to={item.path} 
-              active={location.pathname === item.path || (item.subItems ? location.pathname.includes('cutting') : false)}
+              active={location.pathname === item.path}
               collapsed={collapsed}
               subItems={item.subItems}
               isOpen={openSubMenu === item.label}

@@ -1,3 +1,4 @@
+
 /**
  * 🔒 MÓDULO SALA DE CORTE - APONTAMENTO & ENFESTO
  * ---------------------------------------------------
@@ -12,13 +13,13 @@
  */
 
 import React, { useEffect, useState, useMemo } from 'react';
-import { ProductionOrder, OrderStatus, CuttingJob, Partner, Product, MatrixRatio } from '../types';
+import { ProductionOrder, OrderStatus, CuttingJob, Partner, Product, MatrixRatio, ProductionOrderItem } from '../types';
 import { ApiService } from '../services/api'; // USANDO API REAL
 import { supabase } from '../services/supabase'; // Acesso direto para Pagamentos
 import { 
   Scissors, Layers, CheckCircle2, AlertTriangle, PlayCircle, 
   PauseCircle, Ruler, Scale, Box, User, Save, X, 
-  MoreVertical, Clock, DollarSign, ArrowRight, FileText, Grid3X3
+  MoreVertical, Clock, DollarSign, ArrowRight, FileText, Grid3X3, PlusCircle
 } from 'lucide-react';
 
 // --- HELPERS ---
@@ -29,6 +30,26 @@ const getColorStyle = (colorName: string) => {
         'Rosa': '#ffc0cb', 'Roxo': '#800080'
     };
     return map[colorName] || '#cccccc';
+};
+
+// HELPER: Size Sorting (Duplicated here for safety/autonomy)
+const sortSizes = (a: string, b: string) => {
+    const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
+    const aUpper = a.toUpperCase().trim();
+    const bUpper = b.toUpperCase().trim();
+    
+    const idxA = order.indexOf(aUpper);
+    const idxB = order.indexOf(bUpper);
+    
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    
+    return a.localeCompare(b);
 };
 
 // --- TYPES ---
@@ -90,7 +111,7 @@ export const CuttingModule: React.FC = () => {
 
   // --- LOGIC: STATUS FILTERING ---
   const filteredOps = useMemo(() => {
-      return ops.filter(op => {
+      let filtered = ops.filter(op => {
           // Calculate total cut so far
           const totalCut = op.cuttingDetails?.jobs?.reduce((a,b) => a + b.totalPieces, 0) || 0;
           const isFullyCut = totalCut >= op.quantityTotal;
@@ -117,6 +138,9 @@ export const CuttingModule: React.FC = () => {
           }
           return false;
       });
+
+      // ORDENAÇÃO: Mais recentes primeiro (Requested Change 4)
+      return filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [ops, activeTab]);
 
   // --- CALCULATIONS FOR PREVIEW ---
@@ -238,10 +262,46 @@ export const CuttingModule: React.FC = () => {
               }
           };
 
-          // 3. Handle Overproduction (Update OP Header if needed)
+          // 3. Handle Overproduction Logic (New Grid Calculation)
           if (newTotal > selectedOp.quantityTotal) {
-              updates.quantityTotal = newTotal;
+              // Calculate the NEW real grid based on all jobs + current one
+              const accumulatedItems: Record<string, number> = {}; // Key: Color-Size
               
+              // Helper to accumulate
+              const accumulate = (job: CuttingJob) => {
+                  const matrix = job.matrix; // The ratio used in that job
+                  job.layers.forEach(layer => {
+                      if (layer.layers > 0) {
+                          matrix.forEach(ratio => {
+                              if (ratio.ratio > 0) {
+                                  const key = `${layer.color}###${ratio.size}`;
+                                  accumulatedItems[key] = (accumulatedItems[key] || 0) + (layer.layers * ratio.ratio);
+                              }
+                          });
+                      }
+                  });
+              };
+
+              // Process existing jobs
+              selectedOp.cuttingDetails.jobs?.forEach(accumulate);
+              // Process new job
+              accumulate(newJob);
+
+              // Convert back to array
+              const newItemsArray: ProductionOrderItem[] = Object.entries(accumulatedItems).map(([key, qty]) => {
+                  const [color, size] = key.split('###');
+                  return { color, size, quantity: qty };
+              });
+
+              // Apply Updates
+              updates.quantityTotal = newTotal; // Update total to match reality
+              updates.items = newItemsArray; // Update grid to match reality (so facção gets correct info)
+              
+              // Save original items snapshot if not already saved
+              if (!selectedOp.originalItems || selectedOp.originalItems.length === 0) {
+                  updates.originalItems = selectedOp.items;
+              }
+
               // Add Log
               updates.events = [
                   ...selectedOp.events,
@@ -249,7 +309,7 @@ export const CuttingModule: React.FC = () => {
                       date: new Date().toISOString(),
                       user: authName || 'Sistema',
                       action: 'Autorização Corte',
-                      description: `Quantidade ampliada em ${newTotal - selectedOp.quantityTotal} peças.`,
+                      description: `Corte Excedente Autorizado. Grade atualizada. +${newTotal - selectedOp.quantityTotal} peças além do programado.`,
                       type: 'alert'
                   }
               ];
@@ -260,8 +320,6 @@ export const CuttingModule: React.FC = () => {
           if (cutter && cutter.defaultRate && cutter.defaultRate > 0) {
               const paymentAmount = total * cutter.defaultRate;
               
-              // Getting User Org ID via helper in ApiService is internal, so we assume auth context here or fetch profile.
-              // For simplicity in this specific file context, we fetch the session user.
               const { data: { user } } = await supabase.auth.getUser();
               const { data: profile } = await supabase.from('user_profiles').select('organization_id').eq('id', user?.id).single();
               
@@ -303,7 +361,10 @@ export const CuttingModule: React.FC = () => {
   const renderCard = (op: ProductionOrder) => {
       const prod = products.find(p => p.id === op.productId);
       const totalCut = op.cuttingDetails?.jobs?.reduce((a,b) => a + b.totalPieces, 0) || 0;
-      const progress = Math.min(100, Math.round((totalCut / op.quantityTotal) * 100));
+      const planned = op.quantityTotal;
+      const diff = totalCut - planned;
+      // Use 100% max for bar even if overcut, to prevent overflow visual issues
+      const progress = Math.min(100, Math.round((totalCut / planned) * 100));
       const cutterName = op.cuttingDetails?.cutterName || 'Não Atribuído';
 
       return (
@@ -332,7 +393,7 @@ export const CuttingModule: React.FC = () => {
                   <div className="mb-2">
                       <div className="flex justify-between text-xs mb-1 font-medium text-gray-500">
                           <span>Progresso</span>
-                          <span>{progress}%</span>
+                          <span>{Math.round((totalCut / planned) * 100)}%</span>
                       </div>
                       <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
                           <div 
@@ -342,13 +403,26 @@ export const CuttingModule: React.FC = () => {
                       </div>
                   </div>
                   
-                  <div className="flex justify-between items-center text-xs font-bold text-gray-700">
-                      <span>{totalCut} cortados</span>
-                      <span className="text-gray-400">/ {op.quantityTotal} total</span>
+                  {/* REQUEST 3: EXPLICIT DIFFERENCE DISPLAY */}
+                  <div className="flex justify-between items-end text-xs font-medium text-gray-600 border-t pt-2 mt-2">
+                      <div className="flex flex-col">
+                          <span className="text-[10px] text-gray-400 uppercase">Programado</span>
+                          <span className="font-bold text-sm">{planned}</span>
+                      </div>
+                      <div className="flex flex-col text-center">
+                          <span className="text-[10px] text-gray-400 uppercase">Executado</span>
+                          <span className="font-bold text-sm text-gray-800">{totalCut}</span>
+                      </div>
+                      <div className="flex flex-col text-right">
+                          <span className="text-[10px] text-gray-400 uppercase">Diferença</span>
+                          <span className={`font-bold text-sm ${diff > 0 ? 'text-blue-600' : diff < 0 ? 'text-red-500' : 'text-gray-400'}`}>
+                              {diff > 0 ? `+${diff}` : diff}
+                          </span>
+                      </div>
                   </div>
               </div>
 
-              <div className="pt-4 mt-4 border-t border-gray-100">
+              <div className="pt-4 mt-2">
                   <button 
                     onClick={() => handleOpenCut(op)}
                     className={`w-full py-2.5 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors ${
@@ -358,7 +432,7 @@ export const CuttingModule: React.FC = () => {
                     }`}
                   >
                       {activeTab === 'planned' ? <PlayCircle size={16}/> : <Scissors size={16}/>}
-                      {activeTab === 'planned' ? 'Iniciar Corte' : activeTab === 'completed' ? 'Ver Histórico' : 'Registrar Corte'}
+                      {activeTab === 'planned' ? 'Iniciar Corte' : activeTab === 'completed' ? 'Ver Detalhes' : 'Registrar Corte'}
                   </button>
               </div>
           </div>
@@ -450,26 +524,48 @@ export const CuttingModule: React.FC = () => {
                                             </div>
                                         ))}
                                     </div>
-                                    <div className="text-xs text-gray-500 font-bold uppercase mb-2">Total Programado</div>
-                                    <div className="text-3xl font-bold text-indigo-600">{selectedOp.quantityTotal} <span className="text-sm font-normal text-gray-400">peças</span></div>
+                                    <div className="flex justify-between items-center border-t pt-2 mt-2">
+                                        <div className="text-xs text-gray-500 font-bold uppercase">Total Programado</div>
+                                        <div className="text-xl font-bold text-indigo-600">{selectedOp.quantityTotal} pçs</div>
+                                    </div>
                                 </div>
 
-                                <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><Clock size={18}/> Histórico de Cortes</h3>
-                                <div className="space-y-3">
-                                    {selectedOp.cuttingDetails?.jobs?.slice().reverse().map((job, idx) => (
-                                        <div key={idx} className="bg-white p-3 rounded-lg border border-gray-200 text-sm shadow-sm relative pl-4 overflow-hidden">
-                                            <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500"></div>
-                                            <div className="flex justify-between font-bold text-gray-800 mb-1">
-                                                <span>{new Date(job.date).toLocaleDateString()}</span>
-                                                <span>{job.totalPieces} pçs</span>
+                                {/* REQUEST 2: ENHANCED HISTORY VISUALIZATION */}
+                                <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2 mt-6"><Clock size={18}/> Histórico de Cortes</h3>
+                                <div className="space-y-4">
+                                    {selectedOp.cuttingDetails?.jobs?.slice().reverse().map((job, idx, arr) => {
+                                        // Calculate global index (reverse index to normal 1..N)
+                                        const realIndex = arr.length - idx;
+                                        return (
+                                            <div key={idx} className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm relative pl-4 overflow-hidden group hover:border-orange-300 transition-colors">
+                                                <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500"></div>
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <span className="font-bold text-gray-800 text-sm flex items-center gap-2">
+                                                        <Scissors size={12}/> Corte #{realIndex}
+                                                    </span>
+                                                    <span className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded font-bold">{job.totalPieces} pçs</span>
+                                                </div>
+                                                <div className="text-xs text-gray-500 flex justify-between mt-2">
+                                                    <span>{new Date(job.date).toLocaleDateString()}</span>
+                                                    <span>{job.cutType}</span>
+                                                </div>
+                                                <div className="text-[10px] text-gray-400 mt-1 border-t pt-1 flex justify-between">
+                                                    <span>Risco: {job.markerWeight?.toFixed(2)}kg</span>
+                                                    <span>Taco: {job.tacoNumber}</span>
+                                                </div>
                                             </div>
-                                            <div className="text-xs text-gray-500 flex justify-between">
-                                                <span>Taco: {job.tacoNumber}</span>
-                                                <span>{job.cutType}</span>
-                                            </div>
+                                        );
+                                    })}
+                                    
+                                    {/* Grand Total Summary in History */}
+                                    {selectedOp.cuttingDetails?.jobs?.length ? (
+                                        <div className="bg-gray-800 text-white p-3 rounded-lg text-sm flex justify-between items-center mt-2 shadow-md">
+                                            <span className="font-bold">TOTAL EXECUTADO:</span>
+                                            <span className="font-bold text-lg text-green-400">
+                                                {selectedOp.cuttingDetails.jobs.reduce((a,b)=>a+b.totalPieces,0)} pçs
+                                            </span>
                                         </div>
-                                    ))}
-                                    {(!selectedOp.cuttingDetails?.jobs?.length) && (
+                                    ) : (
                                         <div className="text-sm text-gray-400 italic text-center py-4">Nenhum corte registrado.</div>
                                     )}
                                 </div>
@@ -487,7 +583,7 @@ export const CuttingModule: React.FC = () => {
                             )}
 
                             <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                                <Scissors className="text-orange-600"/> Registrar Novo Enfesto
+                                <PlusCircle className="text-orange-600"/> Registrar Novo Enfesto
                             </h2>
 
                             {/* CORE INPUT: LAYERS PER COLOR */}

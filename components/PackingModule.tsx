@@ -22,6 +22,27 @@ const getColorStyle = (colorName: string) => {
     return map[colorName] || '#cccccc';
 };
 
+// HELPER: Size Sorting
+const sortSizes = (a: string, b: string) => {
+    const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
+    const aUpper = a.toUpperCase().trim();
+    const bUpper = b.toUpperCase().trim();
+    
+    const idxA = order.indexOf(aUpper);
+    const idxB = order.indexOf(bUpper);
+    
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    
+    // Fallback to numeric
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    
+    return a.localeCompare(b);
+};
+
 export const PackingModule: React.FC = () => {
   const { addToast } = useToast();
   const [ops, setOps] = useState<ProductionOrder[]>([]);
@@ -115,7 +136,8 @@ export const PackingModule: React.FC = () => {
                 ? selectedOp.revisionDetails.itemsApproved 
                 : selectedOp.items;
 
-              const sizes = Array.from(new Set(sourceItems.map((i: ProductionOrderItem) => i.size))).sort();
+              // SORT SIZES HERE
+              const sizes = Array.from(new Set(sourceItems.map((i: ProductionOrderItem) => i.size))).sort(sortSizes);
               const colors = Array.from(new Set(sourceItems.map((i: ProductionOrderItem) => i.color)));
               
               colors.forEach((c) => {
@@ -479,7 +501,7 @@ export const PackingModule: React.FC = () => {
                               <thead className="bg-pink-100 text-pink-900 font-bold">
                                   <tr>
                                       <th className="p-3 text-left">Cor / Tam</th>
-                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="p-2 w-16">{s}</th>)}
+                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort(sortSizes).map(s => <th key={s} className="p-2 w-16">{s}</th>)}
                                       <th className="p-3 w-20 bg-pink-200 border-l border-pink-300">Total</th>
                                   </tr>
                               </thead>
@@ -492,7 +514,7 @@ export const PackingModule: React.FC = () => {
                                                   <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
                                                   {color}
                                               </td>
-                                              {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => {
+                                              {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort(sortSizes).map(s => {
                                                   const max = getApprovedQty(color, s);
                                                   const current = packedMatrix[color]?.[s] || 0;
                                                   const isFull = current === max;
@@ -526,7 +548,7 @@ export const PackingModule: React.FC = () => {
                                   {/* Grand Total */}
                                   <tr className="bg-pink-50 font-bold border-t-2 border-pink-200 text-pink-900">
                                       <td className="p-3 text-left">TOTAL GERAL</td>
-                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => (
+                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort(sortSizes).map(s => (
                                           <td key={s} className="p-3">
                                               {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).reduce((acc, c) => acc + (packedMatrix[c]?.[s] || 0), 0)}
                                           </td>

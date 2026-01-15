@@ -55,6 +55,17 @@ export interface UserProfile {
   onboarding_completed?: boolean;
 }
 
+// NEW: Organization Configurations
+export interface OrganizationConfig {
+    organizationId: string;
+    companyLogoUrl?: string;
+    primaryColor: string;
+    enableNotifications: boolean;
+    daysToAlertOverdue: number;
+    defaultPaymentTerms?: string;
+    invoiceFooterText?: string;
+}
+
 // Master Data Interfaces
 export interface Partner {
   id: string;
@@ -467,6 +478,7 @@ export interface ProductionOrder {
   // Totals
   quantityTotal: number;
   items: ProductionOrderItem[]; // Consolidated Items (Plan or Real)
+  originalItems?: ProductionOrderItem[]; // NEW: Snapshot of original planned items (for comparison when overcut happens)
   
   // Status & Dates
   status: OrderStatus;

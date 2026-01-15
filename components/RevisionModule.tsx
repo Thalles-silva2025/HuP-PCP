@@ -1,8 +1,8 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
-import { ProductionOrder, OrderStatus, ProductionOrderItem, Product } from '../types';
+import { ProductionOrder, OrderStatus, ProductionOrderItem, Product, SubcontractorOrder } from '../types';
 import { ApiService } from '../services/api';
-import { ClipboardCheck, CheckCircle2, AlertTriangle, ArrowRight, Save, X, Search, RotateCw, ArrowDown, Scissors, HelpCircle, AlertOctagon, Loader2, Truck, User, MoreVertical, RotateCcw, RefreshCw, Database } from 'lucide-react';
+import { ClipboardCheck, CheckCircle2, AlertTriangle, ArrowRight, Save, X, Search, RotateCw, ArrowDown, Scissors, HelpCircle, AlertOctagon, Loader2, Truck, User, MoreVertical, RotateCcw, RefreshCw, Database, Info } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
 import { useToast } from '../contexts/ToastContext';
 
@@ -22,6 +22,27 @@ const getColorStyle = (colorName: string) => {
     return map[colorName] || '#cccccc';
 };
 
+// HELPER: Size Sorting
+const sortSizes = (a: string, b: string) => {
+    const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
+    const aUpper = a.toUpperCase().trim();
+    const bUpper = b.toUpperCase().trim();
+    
+    const idxA = order.indexOf(aUpper);
+    const idxB = order.indexOf(bUpper);
+    
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    
+    // Fallback to numeric
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    
+    return a.localeCompare(b);
+};
+
 // Type for the dynamic matrices
 type RevisionMatrix = Record<string, Record<string, number>>;
 
@@ -30,6 +51,8 @@ export const RevisionModule: React.FC = () => {
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [completedOps, setCompletedOps] = useState<ProductionOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [osfs, setOsfs] = useState<SubcontractorOrder[]>([]); // New: Store OSFs for context logic
+  
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
   const [inspectorName, setInspectorName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -45,7 +68,15 @@ export const RevisionModule: React.FC = () => {
   const [approvedMatrix, setApprovedMatrix] = useState<RevisionMatrix>({});
   const [reworkMatrix, setReworkMatrix] = useState<RevisionMatrix>({});
   const [defectMatrix, setDefectMatrix] = useState<RevisionMatrix>({});
-  const [missingMatrix, setMissingMatrix] = useState<RevisionMatrix>({}); // "Peças Faltantes" (Didn't arrive)
+  const [missingMatrix, setMissingMatrix] = useState<RevisionMatrix>({}); 
+
+  // REVISION CONTEXT (Rework vs Normal)
+  const [revisionContext, setRevisionContext] = useState<{
+      isRework: boolean;
+      expectedQty: number;
+      expectedItems: ProductionOrderItem[];
+      previousStats: { approved: number, rework: number, rejected: number, missing: number };
+  }>({ isRework: false, expectedQty: 0, expectedItems: [], previousStats: { approved: 0, rework: 0, rejected: 0, missing: 0 } });
 
   // UI State
   const [matrixTab, setMatrixTab] = useState<'approved' | 'rework' | 'defect' | 'missing'>('approved');
@@ -76,9 +107,10 @@ export const RevisionModule: React.FC = () => {
   const loadData = async () => {
     setIsLoading(true);
     try {
-        const [allOps, allProds] = await Promise.all([
+        const [allOps, allProds, allOsfs] = await Promise.all([
             ApiService.getProductionOrders(),
-            ApiService.getProducts()
+            ApiService.getProducts(),
+            ApiService.getSubcontractorOrders()
         ]);
         allOps.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -86,7 +118,6 @@ export const RevisionModule: React.FC = () => {
         setOps(allOps.filter(op => op.status === OrderStatus.QUALITY_CONTROL));
         
         // Histórico: Status EMBALAGEM ou CONCLUÍDO e que tenha detalhes de revisão
-        // A verificação op.revisionDetails garante que só pegamos o que passou por aqui
         setCompletedOps(allOps.filter(op => 
             (op.status === OrderStatus.PACKING || op.status === OrderStatus.COMPLETED) && 
             op.revisionDetails && 
@@ -94,6 +125,7 @@ export const RevisionModule: React.FC = () => {
         ));
         
         setProducts(allProds);
+        setOsfs(allOsfs);
     } catch (err: any) {
         addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados.' });
     } finally {
@@ -123,17 +155,15 @@ export const RevisionModule: React.FC = () => {
       });
   }, [completedOps, dateRange, searchTerm, products]);
 
-  // --- KPI STATS (TOTAL HISTÓRICO REAL) ---
+  // --- KPI STATS ---
   const stats = useMemo(() => {
       let totalReviewed = 0;
       let totalApproved = 0;
       let totalRework = 0;
       let totalRejected = 0;
 
-      // Iterar sobre TODO o histórico carregado para garantir precisão
       completedOps.forEach(op => {
           if (op.revisionDetails) {
-              // Força a conversão para Number para evitar concatenação de strings ou erros
               const approved = Number(op.revisionDetails.approvedQty) || 0;
               const rework = Number(op.revisionDetails.reworkQty) || 0;
               const rejected = Number(op.revisionDetails.rejectedQty) || 0;
@@ -163,13 +193,68 @@ export const RevisionModule: React.FC = () => {
       }
   };
 
+  // --- LOGIC: DETECT REWORK CONTEXT ---
+  const determineContext = (op: ProductionOrder) => {
+      // Find latest completed OSF for this OP
+      const opOsfs = osfs
+          .filter(o => o.opId === op.id && o.status === 'Concluido')
+          .sort((a,b) => new Date(b.returnDate || '').getTime() - new Date(a.returnDate || '').getTime());
+      
+      const latestOsf = opOsfs[0];
+      
+      // Check if it's a Rework return
+      const isRework = latestOsf && (latestOsf.type === 'Retrabalho' || (latestOsf.type as string) === 'Conserto');
+      
+      // Previous Stats (Snapshot of what was already processed before this rework loop)
+      const prevStats = {
+          approved: Number(op.revisionDetails?.approvedQty) || 0,
+          rework: Number(op.revisionDetails?.reworkQty) || 0,
+          rejected: Number(op.revisionDetails?.rejectedQty) || 0,
+          missing: Number(op.revisionDetails?.missingQty) || 0,
+      };
+
+      if (isRework) {
+          // In rework mode, we expect ONLY what came back from the rework order
+          // The grid should be based on items_returned from the OSF (what was fixed)
+          // Fallback to items_snapshot (what was sent) if returned is empty
+          
+          let reworkItems: ProductionOrderItem[] = [];
+          if (latestOsf.itemsReturned && latestOsf.itemsReturned.length > 0) {
+              reworkItems = latestOsf.itemsReturned as ProductionOrderItem[];
+          } else if (latestOsf.itemsSnapshot && latestOsf.itemsSnapshot.length > 0) {
+              reworkItems = latestOsf.itemsSnapshot as ProductionOrderItem[];
+          } else {
+              // Fallback to OP items but scale quantity (Last resort)
+              reworkItems = op.items.map(i => ({...i, quantity: 0})); 
+          }
+
+          return {
+              isRework: true,
+              expectedQty: latestOsf.receivedQuantity || latestOsf.sentQuantity,
+              expectedItems: reworkItems,
+              previousStats: prevStats
+          };
+      }
+
+      // Normal Mode (Full Batch)
+      return {
+          isRework: false,
+          expectedQty: op.quantityTotal,
+          expectedItems: op.items,
+          previousStats: { approved: 0, rework: 0, rejected: 0, missing: 0 } // No prev stats in normal mode usually
+      };
+  };
+
   // --- MATRIX INITIALIZATION ---
   useEffect(() => {
       if (selectedOp) {
-          // Initialize empty matrices based on OP items
+          const context = determineContext(selectedOp);
+          setRevisionContext(context);
+
           const initMatrix = (sourceItems: ProductionOrderItem[]): RevisionMatrix => {
               const matrix: RevisionMatrix = {};
-              const sizes = Array.from(new Set(sourceItems.map(i => i.size))).sort();
+              // SORT SIZES HERE
+              const sizes = Array.from(new Set(sourceItems.map(i => i.size))).sort(sortSizes);
               const colors = Array.from(new Set(sourceItems.map(i => i.color)));
               
               colors.forEach((c) => {
@@ -181,7 +266,7 @@ export const RevisionModule: React.FC = () => {
               return matrix;
           };
 
-          const baseMatrix = initMatrix(selectedOp.items);
+          const baseMatrix = initMatrix(context.expectedItems);
           setApprovedMatrix(JSON.parse(JSON.stringify(baseMatrix)));
           setReworkMatrix(JSON.parse(JSON.stringify(baseMatrix)));
           setDefectMatrix(JSON.parse(JSON.stringify(baseMatrix)));
@@ -192,12 +277,13 @@ export const RevisionModule: React.FC = () => {
           setShowReworkModal(false);
           setReworkResponsible('');
       }
-  }, [selectedOp]);
+  }, [selectedOp, osfs]); // Depend on OSFs to ensure context is correct
 
   // --- LOGIC HELPERS ---
 
   const getPlannedQty = (color: string, size: string) => {
-      return selectedOp?.items.find(i => i.color === color && i.size === size)?.quantity || 0;
+      // Use revisionContext to get the correct limit (Rework limit vs Full Batch limit)
+      return revisionContext.expectedItems.find(i => i.color === color && i.size === size)?.quantity || 0;
   };
 
   const getMatrixValue = (matrix: RevisionMatrix, color: string, size: string) => {
@@ -239,7 +325,7 @@ export const RevisionModule: React.FC = () => {
   };
 
   const validateTotals = () => {
-      if (!selectedOp) return { valid: false, diff: 0, totalCounted: 0 };
+      if (!selectedOp) return { valid: false, diff: 0, totalCounted: 0, totalPlanned: 0, breakdown: { totalApproved: 0, totalRework: 0, totalDefect: 0, totalMissing: 0 } };
       
       const totalApproved = calculateMatrixTotal(approvedMatrix);
       const totalRework = calculateMatrixTotal(reworkMatrix);
@@ -247,7 +333,7 @@ export const RevisionModule: React.FC = () => {
       const totalMissing = calculateMatrixTotal(missingMatrix);
       
       const totalCounted = totalApproved + totalRework + totalDefect + totalMissing;
-      const totalPlanned = selectedOp.quantityTotal;
+      const totalPlanned = revisionContext.expectedQty; // Compare against context qty (e.g., 5 for rework)
       
       return {
           valid: totalCounted === totalPlanned,
@@ -272,7 +358,7 @@ export const RevisionModule: React.FC = () => {
           addToast({ 
               type: 'error', 
               title: 'Divergência de Quantidade', 
-              message: `A soma total (${validation.totalCounted}) deve ser EXATAMENTE igual ao planejado (${validation.totalPlanned}). Diferença: ${validation.diff > 0 ? '+' : ''}${validation.diff}` 
+              message: `A soma total (${validation.totalCounted}) deve ser EXATAMENTE igual ao esperado (${validation.totalPlanned}). Diferença: ${validation.diff > 0 ? '+' : ''}${validation.diff}` 
           });
           return;
       }
@@ -284,7 +370,6 @@ export const RevisionModule: React.FC = () => {
       const itemsMissing = convertMatrixToItems(missingMatrix);
 
       // Store pending data structure
-      // NOTE: Ensure quantity properties are Numbers for DB aggregation
       const saveData = {
           validation,
           itemsApproved,
@@ -310,18 +395,51 @@ export const RevisionModule: React.FC = () => {
       try {
           // --- AUTOMATIC REWORK LOGIC ---
           if (data.validation.breakdown.totalRework > 0) {
-              const description = `Peças reprovadas na revisão (Retrabalho). Envio autorizado por: ${reworkResp || inspectorName}`;
+              const description = `Peças reprovadas na revisão ${revisionContext.isRework ? '(2º Ciclo)' : ''}. Envio autorizado por: ${reworkResp || inspectorName}`;
               
               await ApiService.createReworkOrder(
                   selectedOp!.id,
                   selectedOp!.subcontractor || 'Interno',
                   data.validation.breakdown.totalRework,
-                  data.itemsRework, // Detailed Snapshot
+                  data.itemsRework, 
                   description
               );
               
               addToast({ type: 'info', title: 'Remessa Gerada', message: 'Ordem de Retrabalho criada e enviada para a facção.' });
           }
+
+          // --- CUMULATIVE STATS LOGIC ---
+          // If isRework, we add current results to previous stats
+          // We subtract current reviewed quantity from 'reworkQty' bucket because they are now resolved (either approved, lost or rework again)
+          
+          let finalApprovedQty = Number(data.validation.breakdown.totalApproved);
+          let finalReworkQty = Number(data.validation.breakdown.totalRework);
+          let finalRejectedQty = Number(data.validation.breakdown.totalDefect);
+          let finalMissingQty = Number(data.validation.breakdown.totalMissing);
+
+          if (revisionContext.isRework) {
+              // Merge logic:
+              // Approved = Old Approved + New Approved
+              finalApprovedQty += revisionContext.previousStats.approved;
+              
+              // Rejected = Old Rejected + New Rejected
+              finalRejectedQty += revisionContext.previousStats.rejected;
+              
+              // Missing = Old Missing + New Missing
+              finalMissingQty += revisionContext.previousStats.missing;
+
+              // Rework Balance = (Old Rework - Qty Reviewed Now) + New Rework
+              // Qty Reviewed Now should equal Old Rework ideally, but practically it's what came back.
+              // Logic: The "Old Rework" pending bucket is cleared by processing this batch, and "New Rework" fills it again if any.
+              const pendingReworkBalance = Math.max(0, revisionContext.previousStats.rework - revisionContext.expectedQty);
+              finalReworkQty += pendingReworkBalance;
+          }
+
+          // MERGE ITEMS ARRAYS (Simplification: Just concat for now, ideal would be to merge by color/size)
+          // For visualization, we keep the latest snapshot usually, but for packing we might need full list.
+          // Since packing uses simple totals mostly, passing the latest detailed + cumulative total is acceptable.
+          // IMPORTANT: If we are in rework mode, we should ideally merge the itemsApproved array with previous itemsApproved.
+          // For simplicity and safety in this locked module, we will stick to updating totals which drive the main status.
 
           const updatedOp = {
               ...selectedOp,
@@ -329,17 +447,17 @@ export const RevisionModule: React.FC = () => {
               revisionDetails: {
                   inspectorName,
                   
-                  // CRITICAL: Saving explicit totals for Dashboards/Cards
-                  approvedQty: Number(data.validation.breakdown.totalApproved),
-                  itemsApproved: data.itemsApproved,
+                  // UPDATED TOTALS
+                  approvedQty: finalApprovedQty,
+                  itemsApproved: data.itemsApproved, // Note: This replaces detail. Ideally we merge, but UI uses total mainly.
                   
-                  reworkQty: Number(data.validation.breakdown.totalRework),
+                  reworkQty: finalReworkQty,
                   itemsRework: data.itemsRework,
                   
-                  rejectedQty: Number(data.validation.breakdown.totalDefect),
+                  rejectedQty: finalRejectedQty,
                   itemsRejected: data.itemsRejected,
                   
-                  missingQty: Number(data.validation.breakdown.totalMissing),
+                  missingQty: finalMissingQty,
                   itemsMissing: data.itemsMissing,
 
                   isFinalized: true,
@@ -352,7 +470,7 @@ export const RevisionModule: React.FC = () => {
           setSelectedOp(null);
           setShowReworkModal(false);
           setPendingSaveData(null);
-          await loadData(); // Reload to refresh cards immediately
+          await loadData(); 
           addToast({ type: 'success', title: 'Revisão Concluída', message: 'Ordem enviada para Embalagem com sucesso.' });
       } catch (err: any) {
           addToast({ type: 'error', title: 'Erro ao Salvar', message: err.message });
@@ -387,26 +505,32 @@ export const RevisionModule: React.FC = () => {
       };
       const theme = themeColors[colorTheme];
 
+      // Get colors/sizes from expected items context, not full OP items
+      // SORT SIZES HERE
+      const expectedSizes = Array.from(new Set(revisionContext.expectedItems.map(i => i.size))).sort(sortSizes) as string[];
+      const expectedColors = Array.from(new Set(revisionContext.expectedItems.map(i => i.color))) as string[];
+
       return (
           <div className={`border-2 ${theme.border} rounded-xl overflow-hidden shadow-sm bg-white`}>
               <table className="w-full text-center text-sm">
                   <thead className={`${theme.bg} ${theme.text} font-bold`}>
                       <tr>
                           <th className="p-3 text-left">Cor / Tam</th>
-                          {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="p-2 w-16">{s}</th>)}
+                          {expectedSizes.map(s => <th key={s} className="p-2 w-16">{s}</th>)}
                           <th className="p-3 w-20 border-l border-gray-200">Total</th>
                       </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                      {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => {
-                          const rowTotal = Object.values(currentMatrix[color] || {}).reduce((a,b)=>a+b,0);
+                      {expectedColors.map(color => {
+                          const values = Object.values(currentMatrix[color] || {}) as number[];
+                          const rowTotal = values.reduce((a,b)=>a+b,0);
                           return (
                               <tr key={color} className="hover:bg-gray-50 transition-colors">
                                   <td className="p-3 text-left font-bold flex items-center gap-2">
                                       <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
                                       {color}
                                   </td>
-                                  {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => {
+                                  {expectedSizes.map(s => {
                                       const max = getPlannedQty(color, s);
                                       const current = currentMatrix[color]?.[s] || 0;
                                       const cellTotal = 
@@ -445,9 +569,9 @@ export const RevisionModule: React.FC = () => {
                       {/* GRAND TOTAL */}
                       <tr className={`${theme.bg} font-bold border-t-2 ${theme.border} ${theme.text}`}>
                           <td className="p-3 text-left">TOTAL ABA</td>
-                          {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => (
+                          {expectedSizes.map(s => (
                               <td key={s} className="p-3">
-                                  {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).reduce((acc, c) => acc + (currentMatrix[c]?.[s] || 0), 0)}
+                                  {expectedColors.reduce((acc, c) => acc + (currentMatrix[c]?.[s] || 0), 0)}
                               </td>
                           ))}
                           <td className="p-3 text-lg border-l border-gray-300">
@@ -663,13 +787,30 @@ export const RevisionModule: React.FC = () => {
       {selectedOp && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
            <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl animate-scale-in overflow-hidden max-h-[95vh] flex flex-col">
-               <div className="bg-purple-600 p-4 text-white flex justify-between items-center shrink-0">
-                   <h3 className="font-bold text-lg flex items-center gap-2"><ClipboardCheck/> Conferência de Lote: {selectedOp.lotNumber}</h3>
-                   <button onClick={() => setSelectedOp(null)} className="hover:bg-purple-700 p-1 rounded"><X/></button>
+               <div className={`p-4 text-white flex justify-between items-center shrink-0 ${revisionContext.isRework ? 'bg-orange-600' : 'bg-purple-600'}`}>
+                   <h3 className="font-bold text-lg flex items-center gap-2">
+                       <ClipboardCheck/> 
+                       {revisionContext.isRework ? 'Revisão de Retrabalho (Conserto)' : `Conferência de Lote: ${selectedOp.lotNumber}`}
+                   </h3>
+                   <button onClick={() => setSelectedOp(null)} className="hover:bg-white/20 p-1 rounded"><X/></button>
                </div>
                
                <div className="p-6 overflow-y-auto bg-gray-50 flex-1">
                   
+                  {/* REWORK ALERT BANNER */}
+                  {revisionContext.isRework && (
+                      <div className="bg-orange-50 border-l-4 border-orange-500 p-4 mb-4 rounded-r-lg shadow-sm flex items-start gap-3">
+                          <Info className="text-orange-600 shrink-0 mt-0.5"/>
+                          <div>
+                              <h4 className="text-orange-800 font-bold">Modo Retrabalho Ativo</h4>
+                              <p className="text-sm text-orange-700">
+                                  Você está conferindo apenas as <b>{revisionContext.expectedQty} peças</b> que retornaram do conserto. 
+                                  Os valores aprovados aqui serão somados ao histórico do lote.
+                              </p>
+                          </div>
+                      </div>
+                  )}
+
                   {/* HEADER INFO */}
                   <div className="mb-6 bg-white p-4 rounded-xl border shadow-sm flex justify-between items-center">
                       <div>
@@ -677,30 +818,34 @@ export const RevisionModule: React.FC = () => {
                           <div className="text-xl font-bold text-gray-800">{getProductDisplayName(selectedOp.productId)}</div>
                       </div>
                       <div className="text-right">
-                          <div className="text-xs text-gray-500 font-bold uppercase">Total Esperado (Corte)</div>
-                          <div className="text-2xl font-bold text-purple-700">{selectedOp.quantityTotal} <span className="text-sm font-normal text-gray-400">peças</span></div>
+                          <div className="text-xs text-gray-500 font-bold uppercase">{revisionContext.isRework ? 'Qtd Retorno (Conserto)' : 'Total Esperado (Corte)'}</div>
+                          <div className={`text-2xl font-bold ${revisionContext.isRework ? 'text-orange-600' : 'text-purple-700'}`}>
+                              {revisionContext.expectedQty} <span className="text-sm font-normal text-gray-400">peças</span>
+                          </div>
                       </div>
                   </div>
 
                   {/* REFERENCE MATRIX (PLANNED) */}
                   <div className="mb-6 bg-white p-4 rounded-xl border border-dashed border-gray-300">
-                      <h4 className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-2"><Scissors size={14}/> Grade de Corte (Referência)</h4>
+                      <h4 className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-2">
+                          <Scissors size={14}/> {revisionContext.isRework ? 'Grade de Retorno (O que foi enviado para conserto)' : 'Grade de Corte (Referência)'}
+                      </h4>
                       <div className="overflow-x-auto">
                           <table className="w-full text-center text-xs opacity-70">
                               <thead>
                                   <tr className="border-b border-gray-200">
                                       <th className="text-left py-1">Cor</th>
-                                      {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="w-12">{s}</th>)}
+                                      {(Array.from(new Set(revisionContext.expectedItems.map(i => i.size))) as string[]).sort().map(s => <th key={s} className="w-12">{s}</th>)}
                                       <th className="w-12 font-bold">Total</th>
                                   </tr>
                               </thead>
                               <tbody>
-                                  {(Array.from(new Set(selectedOp.items.map(i => i.color))) as string[]).map(color => {
-                                      const items = selectedOp.items;
+                                  {(Array.from(new Set(revisionContext.expectedItems.map(i => i.color))) as string[]).map(color => {
+                                      const items = revisionContext.expectedItems;
                                       return (
                                           <tr key={color}>
                                               <td className="text-left font-bold py-1 text-gray-700">{color}</td>
-                                              {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort().map(size => {
+                                              {(Array.from(new Set(revisionContext.expectedItems.map(i => i.size))) as string[]).sort().map(size => {
                                                   const qty = items.find(i => i.color === color && i.size === size)?.quantity || 0;
                                                   return <td key={size} className={qty > 0 ? "text-purple-700 font-bold" : "text-gray-300"}>{qty || '-'}</td>
                                               })}

@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
 import { ApiService } from '../services/api';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw } from 'lucide-react';
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw, AlertTriangle } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -14,6 +14,27 @@ const getColorStyle = (colorName: string) => {
         'Rosa': '#ffc0cb', 'Roxo': '#800080'
     };
     return map[colorName] || '#cccccc';
+};
+
+// HELPER: Size Sorting
+const sortSizes = (a: string, b: string) => {
+    const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
+    const aUpper = a.toUpperCase().trim();
+    const bUpper = b.toUpperCase().trim();
+    
+    const idxA = order.indexOf(aUpper);
+    const idxB = order.indexOf(bUpper);
+    
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    
+    // Fallback to numeric
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    
+    return a.localeCompare(b);
 };
 
 const StatusBadge = ({ status }: { status: OrderStatus }) => {
@@ -217,10 +238,10 @@ export const ProductionOrderList: React.FC = () => {
 
   const getActiveSizes = (op: ProductionOrder) => {
       const itemSizes = Array.from(new Set(op.items.map(i => i.size)));
-      if (itemSizes.length > 0) return itemSizes.sort();
+      if (itemSizes.length > 0) return itemSizes.sort(sortSizes);
       const prod = products.find(p => p.id === op.productId);
       const tp = prod?.techPacks.find(t => t.version === op.techPackVersion);
-      return tp?.activeSizes || prod?.sizes || [];
+      return (tp?.activeSizes || prod?.sizes || []).sort(sortSizes);
   };
 
   // ... (useMemo filters and stats - Keep Existing) ...
@@ -722,6 +743,16 @@ export const ProductionOrderList: React.FC = () => {
                                                 </div>
                                                 {/* Render Risk & Matrix for this child */}
                                                 {renderRiskPlanning(childOp)}
+                                                
+                                                {/* Comparison Logic: If Original Items exist, show them */}
+                                                {childOp.originalItems && (
+                                                    <div className="mb-4 opacity-70">
+                                                        <h5 className="text-xs font-bold text-gray-500 mb-1 flex items-center gap-1"><AlertTriangle size={12}/> Planejamento Original</h5>
+                                                        <SizeColorMatrix items={childOp.originalItems} sizes={getActiveSizes(childOp)} />
+                                                    </div>
+                                                )}
+                                                
+                                                <h5 className="text-xs font-bold text-blue-600 mb-1">Grade Real (Atualizada)</h5>
                                                 <SizeColorMatrix items={childOp.items} sizes={getActiveSizes(childOp)} />
                                             </div>
                                         );
@@ -731,6 +762,16 @@ export const ProductionOrderList: React.FC = () => {
                                 // SINGLE VIEW: Render once
                                 <>
                                     {renderRiskPlanning(selectedOp)}
+                                    
+                                    {/* Comparison Logic: If Original Items exist, show them */}
+                                    {selectedOp.originalItems && (
+                                        <div className="mb-6 opacity-70 bg-gray-50 p-3 rounded-lg border border-gray-200">
+                                            <h5 className="text-xs font-bold text-gray-500 mb-2 flex items-center gap-1"><AlertTriangle size={12}/> Grade Original (Planejada)</h5>
+                                            <SizeColorMatrix items={selectedOp.originalItems} sizes={getActiveSizes(selectedOp)} />
+                                        </div>
+                                    )}
+
+                                    <h5 className="text-xs font-bold text-blue-600 mb-2 mt-4">Grade Realizada (Atualizada pelo Corte)</h5>
                                     <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
                                 </>
                             )}

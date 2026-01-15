@@ -23,6 +23,7 @@ import { RevisionModule } from './components/RevisionModule';
 import { PackingModule } from './components/PackingModule';
 import { PaymentsModule } from './components/PaymentsModule';
 import { ProductionGoalModule } from './components/ProductionGoalModule';
+import { SystemConfigModule } from './components/SystemConfigModule'; // New Import
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // Configuração do Cache:
@@ -81,6 +82,9 @@ function App() {
                       <Route path="/tech-packs" element={<TechPackModule />} />
                       <Route path="/settings" element={<SettingsModule />} />
                       <Route path="/reports" element={<ReportsModule />} />
+                      
+                      {/* New Config Route */}
+                      <Route path="/configuration" element={<SystemConfigModule />} />
                       
                       <Route path="*" element={<Navigate to="/" replace />} />
                     </Routes>

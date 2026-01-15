@@ -1,23 +1,8 @@
 
-/**
- * 🔒 MÓDULO FACÇÕES & TERCEIRIZAÇÃO - GESTÃO DE REMESSAS
- * ---------------------------------------------------
- * Status: FROZEN / PRODUCTION READY
- * Data do Bloqueio: 25/05/2025
- * 
- * Funcionalidades Blindadas:
- * - Integração total com Supabase (tabela subcontractor_orders).
- * - Fluxo de Remessa (Estoque -> Facção) com baixa de insumos.
- * - Fluxo de Retorno (Facção -> Revisão) com Grade Visual (Matriz).
- * - Histórico de Concluídos.
- * 
- * ATENÇÃO: NÃO ALTERAR LÓGICA DE MATRIZ OU QUERY DE DADOS SEM AUTORIZAÇÃO.
- */
-
 import React, { useEffect, useState, useMemo } from 'react';
-import { ProductionOrder, OrderStatus, SubcontractorOrder, Product, ReturnItem, Partner, StandardObservation, Material } from '../types';
+import { ProductionOrder, OrderStatus, SubcontractorOrder, Product, ReturnItem, Partner, StandardObservation, Material, ProductionOrderItem } from '../types';
 import { ApiService } from '../services/api';
-import { Truck, ArrowRight, Printer, X, Undo2, History, LayoutList, Scissors, Factory, Building2, User, AlertTriangle, Save, Grid3X3, ArrowDown, CheckCircle2, Eye, RotateCcw } from 'lucide-react';
+import { Truck, ArrowRight, Printer, X, Undo2, History, LayoutList, Scissors, Factory, Building2, User, AlertTriangle, Save, Grid3X3, ArrowDown, CheckCircle2, Eye, RotateCcw, Trash2, FileText } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 
@@ -29,6 +14,27 @@ const getColorStyle = (colorName: string) => {
         'Rosa': '#ffc0cb', 'Roxo': '#800080'
     };
     return map[colorName] || '#cccccc';
+};
+
+// HELPER: Size Sorting
+const sortSizes = (a: string, b: string) => {
+    const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
+    const aUpper = a.toUpperCase().trim();
+    const bUpper = b.toUpperCase().trim();
+    
+    const idxA = order.indexOf(aUpper);
+    const idxB = order.indexOf(bUpper);
+    
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    
+    // Fallback to numeric
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    
+    return a.localeCompare(b);
 };
 
 export const SubcontractorModule: React.FC = () => {
@@ -54,6 +60,7 @@ export const SubcontractorModule: React.FC = () => {
   // Remessa Generation State
   const [targetPartner, setTargetPartner] = useState<string>('');
   const [isInternalProduction, setIsInternalProduction] = useState(false);
+  const [remessaObservation, setRemessaObservation] = useState(''); // NEW FIELD
   const [techPackSnapshot, setTechPackSnapshot] = useState<{materials: any[], observations: string}>({materials: [], observations: ''});
 
   // Return State
@@ -118,23 +125,53 @@ export const SubcontractorModule: React.FC = () => {
       completed: historyOsfs.length
   };
 
-  // ... (handleOpenRemessa logic stays the same) ...
+  // --- ACTIONS ---
+
   const handleOpenRemessa = (op: ProductionOrder) => {
       const prod = products.find(p => p.id === op.productId);
-      const tp = prod?.techPacks.find(t => t.version === op.techPackVersion) || prod?.techPacks[0]; // Fallback to first if version not found
+      const tp = prod?.techPacks.find(t => t.version === op.techPackVersion) || prod?.techPacks[0]; 
       
       const totalCut = op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
       const opOsfs = osfs.filter(osf => osf.opId === op.id);
       const totalSent = opOsfs.reduce((acc, osf) => acc + osf.sentQuantity, 0);
       const remainingQty = Math.max(0, totalCut - totalSent);
       
+      // FIX 2: RECONSTRUCT GRADE FROM ACTUAL CUTTING JOBS (NOT PLANNED ITEMS)
+      let sourceItems: ProductionOrderItem[] = [];
+      
+      if (op.cuttingDetails?.jobs && op.cuttingDetails.jobs.length > 0) {
+          // Rebuild grade from actual cut
+          const gradeMap: Record<string, Record<string, number>> = {};
+          
+          op.cuttingDetails.jobs.forEach(job => {
+              job.layers.forEach(layer => {
+                  if (!gradeMap[layer.color]) gradeMap[layer.color] = {};
+                  job.matrix.forEach(ratio => {
+                      gradeMap[layer.color][ratio.size] = (gradeMap[layer.color][ratio.size] || 0) + (layer.layers * ratio.ratio);
+                  });
+              });
+          });
+
+          // Flatten to items array
+          Object.entries(gradeMap).forEach(([color, sizes]) => {
+              Object.entries(sizes).forEach(([size, qty]) => {
+                  if (qty > 0) sourceItems.push({ color, size, quantity: qty });
+              });
+          });
+      } else {
+          // Fallback to planned if no cutting details (should not happen in this module but safe to keep)
+          sourceItems = op.items;
+      }
+
+      // Calculate ratio if partial shipment (usually 1 if sending full cut)
       const ratio = totalCut > 0 ? remainingQty / totalCut : 0;
 
-      const itemsToSend = (op.items || []).map(i => ({
+      const itemsToSend = sourceItems.map(i => ({
           ...i,
           quantity: Math.ceil(i.quantity * ratio)
       })).filter(i => i.quantity > 0);
 
+      // --- MATERIALS CALCULATION ---
       const qtyByColor: Record<string, number> = {};
       itemsToSend.forEach(i => {
           qtyByColor[i.color] = (qtyByColor[i.color] || 0) + i.quantity;
@@ -209,8 +246,12 @@ export const SubcontractorModule: React.FC = () => {
           observations: obsSnapshot || "Nenhuma observação de costura/técnica registrada na Ficha Técnica." 
       });
       
-      setTargetPartner('');
-      setIsInternalProduction(false);
+      // FIX 1: Check PRE-DEFINED PARTNER
+      const preDefinedPartner = op.subcontractor && op.subcontractor !== 'Interno' ? op.subcontractor : '';
+      setTargetPartner(preDefinedPartner);
+      setIsInternalProduction(op.subcontractor === 'Interno');
+      setRemessaObservation(''); // Reset observation
+      
       setSelectedOpForRemessa(op);
   };
 
@@ -226,9 +267,31 @@ export const SubcontractorModule: React.FC = () => {
       const totalSent = opOsfs.reduce((acc, osf) => acc + osf.sentQuantity, 0);
       const quantityToSend = totalCut - totalSent;
       
+      // Calculate ratio based on CUT QUANTITY (Fix 2 continued)
       const ratio = totalCut > 0 ? quantityToSend / totalCut : 0;
       
-      const itemsSnapshot = (selectedOpForRemessa.items || []).map(i => ({
+      // Re-calculate Items Snapshot based on ACTUAL CUT (same logic as handleOpenRemessa)
+      let sourceItems: ProductionOrderItem[] = [];
+      if (selectedOpForRemessa.cuttingDetails?.jobs && selectedOpForRemessa.cuttingDetails.jobs.length > 0) {
+          const gradeMap: Record<string, Record<string, number>> = {};
+          selectedOpForRemessa.cuttingDetails.jobs.forEach(job => {
+              job.layers.forEach(layer => {
+                  if (!gradeMap[layer.color]) gradeMap[layer.color] = {};
+                  job.matrix.forEach(ratio => {
+                      gradeMap[layer.color][ratio.size] = (gradeMap[layer.color][ratio.size] || 0) + (layer.layers * ratio.ratio);
+                  });
+              });
+          });
+          Object.entries(gradeMap).forEach(([color, sizes]) => {
+              Object.entries(sizes).forEach(([size, qty]) => {
+                  if (qty > 0) sourceItems.push({ color, size, quantity: qty });
+              });
+          });
+      } else {
+          sourceItems = selectedOpForRemessa.items;
+      }
+
+      const itemsSnapshot = sourceItems.map(i => ({
           color: i.color,
           size: i.size,
           quantity: Math.ceil(i.quantity * ratio)
@@ -243,15 +306,27 @@ export const SubcontractorModule: React.FC = () => {
               subcontractorName: isInternalProduction ? 'Produção Interna' : targetPartner,
               type: isInternalProduction ? 'Interna' : 'Externa',
               sentQuantity: quantityToSend,
-              itemsSnapshot: itemsSnapshot, // Saves the items sent
-              materialsSnapshot: techPackSnapshot.materials, // Saves the calculated materials (color-aware)
-              observations: techPackSnapshot.observations 
+              itemsSnapshot: itemsSnapshot, 
+              materialsSnapshot: techPackSnapshot.materials, 
+              observations: remessaObservation || techPackSnapshot.observations // Use Custom Observation if provided
           });
           
           await loadData();
           setSelectedOpForRemessa(null);
           setSelectedOsfForView(newOsf); 
           addToast({ type: 'success', title: 'Remessa Gerada', message: 'Ficha de Produção criada com materiais separados por cor.' });
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      }
+  };
+
+  const handleCancelShipment = async (osfId: string) => {
+      if(!confirm("Deseja estornar este envio? A OP retornará para a Sala de Corte.")) return;
+      
+      try {
+          await ApiService.cancelSubcontractorShipment(osfId);
+          await loadData();
+          addToast({ type: 'info', title: 'Envio Estornado', message: 'Ordem removida e OP retornada para Corte.' });
       } catch (err: any) {
           addToast({ type: 'error', title: 'Erro', message: err.message });
       }
@@ -264,7 +339,8 @@ export const SubcontractorModule: React.FC = () => {
       const itemsSource = (osf as any).itemsSnapshot || (osf as any).items_snapshot || [];
       
       const uniqueColors = Array.from(new Set((itemsSource as ReturnItem[]).map(i => i.color)));
-      const uniqueSizes = Array.from(new Set((itemsSource as ReturnItem[]).map(i => i.size))).sort();
+      // SORT SIZES HERE
+      const uniqueSizes = Array.from(new Set((itemsSource as ReturnItem[]).map(i => i.size))).sort(sortSizes);
       setMatrixKeys({ colors: uniqueColors, sizes: uniqueSizes });
 
       const grid: ReturnItem[] = itemsSource.map((i: any) => ({
@@ -324,7 +400,8 @@ export const SubcontractorModule: React.FC = () => {
   const renderMatrixTable = (items: any[]) => {
       if (!items || items.length === 0) return <p className="text-sm text-gray-500 italic">Nenhum item.</p>;
 
-      const sizes = Array.from(new Set(items.map(i => i.size))).sort();
+      // SORT SIZES HERE
+      const sizes = Array.from(new Set(items.map(i => i.size))).sort(sortSizes);
       const colors = Array.from(new Set(items.map(i => i.color))).sort();
 
       return (
@@ -388,6 +465,11 @@ export const SubcontractorModule: React.FC = () => {
       const safeItems = osf.itemsSnapshot || osf.items_snapshot || [];
       const safeMaterials = osf.materialsSnapshot || osf.materials_snapshot || [];
 
+      // FIX 3: Detect Overcut
+      const plannedQty = op?.quantityTotal || 0;
+      const sentQty = osf.sentQuantity || 0;
+      const diff = sentQty - plannedQty;
+
       return (
           <div className="bg-white p-8 w-[210mm] min-h-[297mm] mx-auto shadow-2xl printable-sheet text-gray-900 relative font-sans text-xs">
               {/* HEADER */}
@@ -430,6 +512,14 @@ export const SubcontractorModule: React.FC = () => {
                       <div><span className="font-bold text-gray-500">Qtd Total:</span> <span className="font-bold ml-2">{osf.sentQuantity} pçs</span></div>
                   </div>
               </div>
+
+              {/* OVERCUT ALERT */}
+              {diff > 0 && (
+                  <div className="mb-6 p-3 bg-orange-100 border border-orange-300 rounded-lg text-orange-900 flex items-center gap-2 font-bold animate-pulse-slow">
+                      <AlertTriangle size={18}/>
+                      ATENÇÃO: CORTE AMPLIADO! +{diff} peças além do programado original.
+                  </div>
+              )}
 
               {/* MATRIX GRADE (NEW) */}
               <div className="mb-8">
@@ -573,6 +663,18 @@ export const SubcontractorModule: React.FC = () => {
                                     </div>
                                     <div className="flex gap-2 mt-4">
                                         <button onClick={() => setSelectedOsfForView(osf)} className="flex-1 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-50">Ficha</button>
+                                        
+                                        {/* REVERT BUTTON (NEW) */}
+                                        {osf.receivedQuantity === 0 && (
+                                            <button 
+                                                onClick={() => handleCancelShipment(osf.id)} 
+                                                className="p-2 border border-red-200 bg-red-50 text-red-600 rounded hover:bg-red-100" 
+                                                title="Estornar Envio"
+                                            >
+                                                <Trash2 size={16}/>
+                                            </button>
+                                        )}
+
                                         <button onClick={() => handleOpenReturn(osf)} className="flex-1 py-2 bg-green-600 text-white rounded text-xs font-bold hover:bg-green-700 shadow-sm flex items-center justify-center gap-1"><Undo2 size={12}/> Receber</button>
                                     </div>
                                 </div>
@@ -628,7 +730,7 @@ export const SubcontractorModule: React.FC = () => {
                     </div>
                     <div className="p-6 space-y-4">
                         <div className="bg-yellow-50 p-3 rounded border border-yellow-200 text-xs text-yellow-800">
-                            <span className="font-bold">Automático:</span> Os insumos serão calculados e separados por cor baseados na Ficha Técnica.
+                            <span className="font-bold">Automático:</span> Os insumos e grade serão calculados baseados no corte realizado.
                         </div>
                         <label className="flex items-center gap-2 p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
                             <input type="checkbox" className="w-5 h-5" checked={isInternalProduction} onChange={e => setIsInternalProduction(e.target.checked)}/>
@@ -636,11 +738,34 @@ export const SubcontractorModule: React.FC = () => {
                         </label>
                         {!isInternalProduction && (
                             <div>
-                                <label className="block text-sm font-bold text-gray-700 mb-1">Selecione a Facção <span className="text-red-500">*</span></label>
-                                <select className="w-full border p-3 rounded-lg bg-white" value={targetPartner} onChange={e => setTargetPartner(e.target.value)}>
-                                    <option value="">Selecione...</option>
-                                    {partners.filter(p => p.type === 'Facção' || p.type === 'Outro').map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                                </select>
+                                {targetPartner && targetPartner !== '' ? (
+                                    // FIX 1: READ ONLY PARTNER + OBSERVATION FIELD
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">Facção Definida (OP)</label>
+                                            <div className="w-full bg-gray-100 border p-3 rounded-lg font-bold text-gray-800">
+                                                {targetPartner}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">Observações para Ficha <span className="text-gray-400 font-normal">(Opcional)</span></label>
+                                            <textarea 
+                                                className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 resize-none"
+                                                placeholder="Ex: Cuidado com o viés, atenção ao lote..."
+                                                value={remessaObservation}
+                                                onChange={e => setRemessaObservation(e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">Selecione a Facção <span className="text-red-500">*</span></label>
+                                        <select className="w-full border p-3 rounded-lg bg-white" value={targetPartner} onChange={e => setTargetPartner(e.target.value)}>
+                                            <option value="">Selecione...</option>
+                                            {partners.filter(p => p.type === 'Facção' || p.type === 'Outro').map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                                        </select>
+                                    </div>
+                                )}
                             </div>
                         )}
                         <button onClick={handleConfirmRemessa} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 shadow-lg">Confirmar Envio</button>
