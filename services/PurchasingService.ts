@@ -31,6 +31,7 @@ export const PurchasingService = {
                 purchaseDate: p.purchase_date,
                 invoiceNumber: p.invoice_number,
                 quantity: Number(p.quantity),
+                originalQuantity: Number(p.original_quantity || p.quantity), // Mapping new field
                 unitPricePaid: Number(p.unit_price_paid),
                 totalCost: Number(p.total_cost),
                 unitPriceStandard: Number(p.unit_price_standard_at_time),
@@ -48,14 +49,17 @@ export const PurchasingService = {
 
     // Registra uma nova compra (AGORA SEMPRE PENDENTE DE CONFERÊNCIA)
     registerPurchase: async (
-        purchaseData: Omit<MaterialPurchase, 'id'>, 
+        purchaseData: Omit<MaterialPurchase, 'id'> & { dueDate?: string }, 
         options: { createPayment: boolean, organizationId: string }
     ) => {
-        const { materialId, quantity, unitPricePaid, colorBreakdown } = purchaseData;
+        const { materialId, quantity, unitPricePaid, colorBreakdown, dueDate } = purchaseData;
 
         // 1. Gera Pagamento (Provisionamento Financeiro)
         let paymentId = null;
         if (options.createPayment) {
+            // Se dueDate não for fornecida, calcula 30 dias
+            const calculatedDueDate = dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
             const { data: payment, error: payError } = await supabase.from('payments').insert([{
                 organization_id: options.organizationId,
                 partner_name: purchaseData.supplier,
@@ -65,7 +69,7 @@ export const PurchasingService = {
                 amount_paid: 0, // Inicia pendente
                 status: 'Pendente',
                 date: purchaseData.purchaseDate,
-                due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // +30 Dias padrão
+                due_date: calculatedDueDate, // Usa o vencimento escolhido ou calculado
                 op_id: null // Não vinculado a OP
             }]).select('id').single();
             
@@ -90,6 +94,7 @@ export const PurchasingService = {
                 purchase_date: purchaseData.purchaseDate,
                 invoice_number: purchaseData.invoiceNumber,
                 quantity: quantity,
+                original_quantity: quantity, // Salva o original para comparação
                 unit_price_paid: unitPricePaid,
                 total_cost: quantity * unitPricePaid,
                 unit_price_standard_at_time: material?.cost_unit || 0,

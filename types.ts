@@ -156,11 +156,12 @@ export interface Material {
 export interface Partner {
   id: string;
   name: string;
-  type: 'Facção' | 'Cortador' | 'Revisão' | 'Embalagem' | 'Outro';
+  type: 'Facção' | 'Cortador' | 'Revisão' | 'Embalagem' | 'Fornecedor' | 'Outro'; // Added Fornecedor
   contractType: 'PJ' | 'CLT';
   address?: string;
   phone?: string;
   defaultRate?: number;
+  observations?: string; // New field
 }
 
 export interface Warehouse {
@@ -242,6 +243,7 @@ export interface PackingDetails {
   warehouse?: string;
   isFinalized: boolean;
   packedDate?: string;
+  executor?: string;
 }
 
 export interface SubcontractorDetails {
@@ -430,6 +432,7 @@ export interface MaterialPurchase {
     purchaseDate: string;
     invoiceNumber?: string;
     quantity: number;
+    originalQuantity?: number; // New field for audit
     unitPricePaid: number;
     totalCost: number;
     unitPriceStandard?: number;

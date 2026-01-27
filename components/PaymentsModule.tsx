@@ -2,11 +2,12 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, Partner } from '../types';
 import { ApiService } from '../services/api';
+import { PurchasingService } from '../services/PurchasingService'; // Import Service
 import { supabase } from '../services/supabase'; // Direct Access for Updates
 import { 
   DollarSign, CheckCircle2, Search, Filter, 
   Wallet, AlertCircle, Clock, ChevronDown, 
-  Download, X, Banknote, CalendarDays, Loader2, Tag, ArrowRight
+  Download, X, Banknote, CalendarDays, Loader2, Tag, ArrowRight, ShoppingCart, Scissors, Package
 } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
 import { useToast } from '../contexts/ToastContext';
@@ -37,6 +38,7 @@ interface FinancialFilters {
     search: string;
     status: 'ALL' | 'OVERDUE' | 'TODAY' | 'OPEN' | 'PAID';
     partner: string;
+    category: 'ALL' | 'FACCAO' | 'COMPRA'; // Novo filtro de categoria
     startDate: Date;
     endDate: Date;
     label: string;
@@ -47,6 +49,7 @@ export const PaymentsModule: React.FC = () => {
   const queryClient = useQueryClient();
 
   // --- DATA FETCHING ---
+  // Busca TODOS os pagamentos do banco (inclui compras)
   const { data: dbPayments = [], isLoading: loadingPayments } = useQuery({
       queryKey: ['payments'],
       queryFn: ApiService.getPayments,
@@ -65,6 +68,13 @@ export const PaymentsModule: React.FC = () => {
       staleTime: 1000 * 60 * 10
   });
 
+  // NEW: Fetch Material Purchases to link data
+  const { data: materialPurchases = [] } = useQuery({
+      queryKey: ['purchases'],
+      queryFn: PurchasingService.getPurchases,
+      staleTime: 1000 * 60 * 2
+  });
+
   const { data: partnersList = [] } = useQuery({
       queryKey: ['partners'],
       queryFn: ApiService.getPartners,
@@ -74,13 +84,15 @@ export const PaymentsModule: React.FC = () => {
   // Filters State
   const today = new Date();
   const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0); // Ajuste
   
   const [filters, setFilters] = useState<FinancialFilters>({
       search: '',
       status: 'ALL',
       partner: '',
+      category: 'ALL', // Default
       startDate: startOfMonth, 
-      endDate: today,
+      endDate: endOfMonth,
       label: 'Este Mês'
   });
 
@@ -93,9 +105,28 @@ export const PaymentsModule: React.FC = () => {
   // --- DATA PROCESSING (RICH LISTING) ---
   const payables = useMemo(() => {
       return dbPayments.map(p => {
-          // 1. Enrich with OP Data
+          // 1. Enrich with OP Data (Default)
           const op = ops.find(o => o.id === p.opId);
           const prod = op ? products.find(prod => prod.id === op.productId) : null;
+
+          let finalProductName = prod?.name || 'Produto Desconhecido';
+          let finalLot = op?.lotNumber || 'N/A';
+
+          // 1.b Enrich with Material Purchase Data (Override if it's a purchase)
+          // Verifica se é compra de material e tenta achar os detalhes
+          if (p.stage === 'Compra Material' || p.partnerType === 'Fornecedor') {
+              // Find the purchase record linked to this payment
+              // Tenta pelo ID do pagamento OU correspondência de valor/data (fallback)
+              const purchase = materialPurchases.find(m => m.paymentId === p.id);
+              
+              if (purchase) {
+                  finalProductName = purchase.materialName || 'Matéria Prima';
+                  finalLot = purchase.invoiceNumber ? `NF: ${purchase.invoiceNumber}` : 'Compra Direta';
+              } else {
+                  finalProductName = 'Compra de Material';
+                  finalLot = 'Estoque';
+              }
+          }
 
           // 2. Calculate Dates (Default Due Date = Execution + 24h)
           let execDate = new Date(p.date);
@@ -128,8 +159,8 @@ export const PaymentsModule: React.FC = () => {
           return {
               id: p.id,
               opId: p.opId,
-              opLot: op?.lotNumber || 'N/A',
-              productName: prod?.name || 'Produto Desconhecido',
+              opLot: finalLot,
+              productName: finalProductName,
               partner: p.partnerName,
               partnerType: p.partnerType,
               serviceType: p.stage || p.partnerType,
@@ -151,7 +182,7 @@ export const PaymentsModule: React.FC = () => {
           if (!a.isOverdue && b.isOverdue) return 1;
           return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
       });
-  }, [dbPayments, ops, products]);
+  }, [dbPayments, ops, products, materialPurchases]);
 
   // --- FILTERING ---
   const filteredData = useMemo(() => {
@@ -164,6 +195,14 @@ export const PaymentsModule: React.FC = () => {
 
           // Partner
           const partnerMatch = !filters.partner || p.partner === filters.partner;
+
+          // Category Filter (Facção vs Compra)
+          let categoryMatch = true;
+          if (filters.category === 'FACCAO') {
+              categoryMatch = p.partnerType === 'Facção' || p.serviceType === 'Costura' || p.serviceType === 'Facção';
+          } else if (filters.category === 'COMPRA') {
+              categoryMatch = p.partnerType === 'Fornecedor' || p.serviceType === 'Compra Material';
+          }
 
           // Status
           let statusMatch = true;
@@ -180,18 +219,24 @@ export const PaymentsModule: React.FC = () => {
 
           // Date Range (Applied to Due Date)
           let dateMatch = true;
-          const filterStart = new Date(filters.startDate); filterStart.setHours(0,0,0,0);
-          const filterEnd = new Date(filters.endDate); filterEnd.setHours(23,59,59,999);
           
-          const itemDate = new Date(p.dueDate); itemDate.setHours(0,0,0,0);
-          dateMatch = itemDate >= filterStart && itemDate <= filterEnd;
+          if (filters.label === 'Todo o Período') {
+              dateMatch = true;
+          } else {
+              const filterStart = new Date(filters.startDate); filterStart.setHours(0,0,0,0);
+              const filterEnd = new Date(filters.endDate); filterEnd.setHours(23,59,59,999);
+              
+              const itemDate = new Date(p.dueDate); itemDate.setHours(0,0,0,0);
+              dateMatch = itemDate >= filterStart && itemDate <= filterEnd;
+          }
 
-          return textMatch && partnerMatch && statusMatch && dateMatch;
+          return textMatch && partnerMatch && statusMatch && dateMatch && categoryMatch;
       });
   }, [payables, filters]);
 
   // --- KPI STATS ---
   const stats = useMemo(() => {
+      // Base sets
       const pending = payables.filter(p => p.status !== 'Pago');
       const overdue = pending.filter(p => p.isOverdue);
       const dueToday = pending.filter(p => {
@@ -200,6 +245,10 @@ export const PaymentsModule: React.FC = () => {
           return d.getTime() === n.getTime();
       });
       const paid = payables.filter(p => p.status === 'Pago');
+
+      // Specific Categories (Pending Only)
+      const faccaoPending = pending.filter(p => p.partnerType === 'Facção' || p.serviceType === 'Costura' || p.serviceType === 'Facção');
+      const compraPending = pending.filter(p => p.partnerType === 'Fornecedor' || p.serviceType === 'Compra Material');
 
       const sum = (arr: PayableItem[]) => arr.reduce((acc, item) => acc + (Number(item.total) - Number(item.amountPaid)), 0);
       const sumPaid = (arr: PayableItem[]) => arr.reduce((acc, item) => acc + Number(item.amountPaid), 0);
@@ -211,7 +260,12 @@ export const PaymentsModule: React.FC = () => {
           todayValue: sum(dueToday),
           paidCount: paid.length,
           paidValue: sumPaid(paid),
-          totalOpenValue: sum(pending)
+          totalOpenValue: sum(pending),
+          // New Stats
+          faccaoCount: faccaoPending.length,
+          faccaoValue: sum(faccaoPending),
+          compraCount: compraPending.length,
+          compraValue: sum(compraPending)
       };
   }, [payables]);
 
@@ -269,6 +323,28 @@ export const PaymentsModule: React.FC = () => {
       return isNaN(date.getTime()) ? '-' : date.toLocaleDateString('pt-BR');
   };
 
+  // Helper to handle card click
+  // FIX: Force label to 'Todo o Período' so the list matches the Card total.
+  const setCardFilter = (type: 'FACCAO' | 'COMPRA' | 'OVERDUE' | 'TODAY' | 'OPEN' | 'PAID') => {
+      const allPeriodFilter = { ...filters, label: 'Todo o Período' }; // Important: Override date filter
+
+      if (type === 'FACCAO') {
+          setFilters({ ...allPeriodFilter, category: 'FACCAO', status: 'OPEN' });
+      } else if (type === 'COMPRA') {
+          setFilters({ ...allPeriodFilter, category: 'COMPRA', status: 'OPEN' });
+      } else if (type === 'OVERDUE') {
+          setFilters({ ...allPeriodFilter, category: 'ALL', status: 'OVERDUE' });
+      } else if (type === 'TODAY') {
+          // Exception: "Vence Hoje" uses TODAY's date implicitly in the filter logic, so 'Todo o Período' is fine or custom
+          setFilters({ ...allPeriodFilter, category: 'ALL', status: 'TODAY' });
+      } else if (type === 'PAID') {
+          setFilters({ ...filters, category: 'ALL', status: 'PAID' }); // Keep current date for PAID (usually monthly view)
+      } else {
+          // Total Open
+          setFilters({ ...allPeriodFilter, category: 'ALL', status: 'OPEN' });
+      }
+  };
+
   return (
     <div className="space-y-6 pb-20 animate-fade-in bg-gray-50/50 min-h-screen">
       {/* HEADER */}
@@ -277,20 +353,59 @@ export const PaymentsModule: React.FC = () => {
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
             <span title="Carteira"><Wallet className="text-green-600" /></span> Contas a Pagar (Serviços)
           </h1>
-          <p className="text-gray-500 text-sm mt-1">Gestão financeira de facções e prestadores de serviço terceirizados.</p>
+          <p className="text-gray-500 text-sm mt-1">Gestão financeira de facções, compras e serviços.</p>
         </div>
         <div className="flex flex-col items-end">
             <div className="text-xs text-gray-400 bg-white px-3 py-1 rounded border shadow-sm flex items-center gap-1">
-                <Clock size={12}/> Vencimento Padrão: <b>24h</b> após execução
+                <Clock size={12}/> Vencimento Padrão: <b>24h</b> após execução (ou definido na nota)
             </div>
         </div>
       </div>
 
-      {/* KPI DASHBOARD */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Card 1: Vencidos (Critical) */}
+      {/* KPI DASHBOARD (6 CARDS GRID) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {/* Card 1: Facção */}
           <div 
-            onClick={() => setFilters({...filters, status: 'OVERDUE'})}
+            onClick={() => setCardFilter('FACCAO')}
+            className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.category === 'FACCAO' ? 'ring-2 ring-purple-500 border-purple-500' : 'border-purple-500'}`}
+          >
+              <div className="flex justify-between items-start mb-2">
+                  <div className="p-2 bg-purple-50 text-purple-600 rounded-lg"><span title="Facção"><Scissors size={20}/></span></div>
+                  <span className="text-xs font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded-full">{stats.faccaoCount} pendentes</span>
+              </div>
+              <div className="text-gray-500 text-xs font-bold uppercase">A Pagar (Facção)</div>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.faccaoValue)}</div>
+          </div>
+
+          {/* Card 2: Compras */}
+          <div 
+            onClick={() => setCardFilter('COMPRA')}
+            className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.category === 'COMPRA' ? 'ring-2 ring-teal-500 border-teal-500' : 'border-teal-500'}`}
+          >
+              <div className="flex justify-between items-start mb-2">
+                  <div className="p-2 bg-teal-50 text-teal-600 rounded-lg"><span title="Compras"><Package size={20}/></span></div>
+                  <span className="text-xs font-bold text-teal-600 bg-teal-50 px-2 py-1 rounded-full">{stats.compraCount} pendentes</span>
+              </div>
+              <div className="text-gray-500 text-xs font-bold uppercase">A Pagar (Compras)</div>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.compraValue)}</div>
+          </div>
+
+          {/* Card 3: Total Aberto */}
+          <div 
+            onClick={() => setCardFilter('OPEN')}
+            className="bg-white p-5 rounded-xl border-l-4 border-gray-300 shadow-sm cursor-pointer transition-all hover:shadow-md"
+          >
+              <div className="flex justify-between items-start mb-2">
+                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><span title="Relógio"><DollarSign size={20}/></span></div>
+                  <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">Total Geral</span>
+              </div>
+              <div className="text-gray-500 text-xs font-bold uppercase">Carteira em Aberto</div>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.totalOpenValue)}</div>
+          </div>
+
+          {/* Card 4: Vencidos */}
+          <div 
+            onClick={() => setCardFilter('OVERDUE')}
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'OVERDUE' ? 'ring-2 ring-red-500 border-red-500' : 'border-red-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
@@ -301,9 +416,9 @@ export const PaymentsModule: React.FC = () => {
               <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.overdueValue)}</div>
           </div>
 
-          {/* Card 2: Vence Hoje (Action) */}
+          {/* Card 5: Vence Hoje */}
           <div 
-            onClick={() => setFilters({...filters, status: 'TODAY'})}
+            onClick={() => setCardFilter('TODAY')}
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'TODAY' ? 'ring-2 ring-blue-500 border-blue-500' : 'border-blue-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
@@ -314,22 +429,9 @@ export const PaymentsModule: React.FC = () => {
               <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.todayValue)}</div>
           </div>
 
-          {/* Card 3: Total Aberto */}
+          {/* Card 6: Pago */}
           <div 
-            onClick={() => setFilters({...filters, status: 'OPEN'})}
-            className="bg-white p-5 rounded-xl border-l-4 border-gray-300 shadow-sm cursor-pointer transition-all hover:shadow-md"
-          >
-              <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><span title="Relógio"><DollarSign size={20}/></span></div>
-                  <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">Total Pendente</span>
-              </div>
-              <div className="text-gray-500 text-xs font-bold uppercase">Carteira em Aberto</div>
-              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.totalOpenValue)}</div>
-          </div>
-
-          {/* Card 4: Pago */}
-          <div 
-            onClick={() => setFilters({...filters, status: 'PAID'})}
+            onClick={() => setCardFilter('PAID')}
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'PAID' ? 'ring-2 ring-green-500 border-green-500' : 'border-green-500'}`}
           >
               <div className="flex justify-between items-start mb-2">
@@ -372,6 +474,19 @@ export const PaymentsModule: React.FC = () => {
 
               <div className="relative">
                   <select 
+                    className="w-full lg:w-40 pl-3 pr-8 py-2 border rounded-lg appearance-none bg-white text-sm focus:ring-2 focus:ring-green-500 outline-none cursor-pointer"
+                    value={filters.category}
+                    onChange={e => setFilters({...filters, category: e.target.value as any})}
+                  >
+                      <option value="ALL">Tipo: Todos</option>
+                      <option value="FACCAO">Serviço/Facção</option>
+                      <option value="COMPRA">Compras/Material</option>
+                  </select>
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"><ChevronDown size={16}/></span>
+              </div>
+
+              <div className="relative">
+                  <select 
                     className="w-full lg:w-48 pl-3 pr-8 py-2 border rounded-lg appearance-none bg-white text-sm focus:ring-2 focus:ring-green-500 outline-none cursor-pointer"
                     value={filters.partner}
                     onChange={e => setFilters({...filters, partner: e.target.value})}
@@ -394,7 +509,7 @@ export const PaymentsModule: React.FC = () => {
 
           <div className="flex gap-2">
               <button 
-                onClick={() => setFilters({ search: '', status: 'ALL', partner: '', startDate: startOfMonth, endDate: today, label: 'Este Mês' })}
+                onClick={() => setFilters({ search: '', status: 'ALL', partner: '', category: 'ALL', startDate: startOfMonth, endDate: endOfMonth, label: 'Este Mês' })}
                 className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"
                 title="Limpar Filtros"
               >
@@ -413,7 +528,7 @@ export const PaymentsModule: React.FC = () => {
                   <tr>
                       <th className="p-4 w-10">St</th>
                       <th className="p-4">Vencimento</th>
-                      <th className="p-4">OP / Lote</th>
+                      <th className="p-4">OP / Lote / NF</th>
                       <th className="p-4">Favorecido (Parceiro)</th>
                       <th className="p-4">Detalhes do Serviço</th>
                       <th className="p-4 text-right">Valor Total</th>
@@ -425,6 +540,7 @@ export const PaymentsModule: React.FC = () => {
                   {filteredData.map(item => {
                       const isPaid = item.status === 'Pago';
                       const remaining = item.total - item.amountPaid;
+                      const isMaterialPurchase = item.serviceType === 'Compra Material';
                       
                       return (
                           <tr key={item.id} className={`hover:bg-gray-50 transition-colors ${item.isOverdue ? 'bg-red-50/30' : ''}`}>
@@ -444,8 +560,9 @@ export const PaymentsModule: React.FC = () => {
                                   <div className="text-xs text-gray-400">Exec: {formatDate(item.executionDate)}</div>
                               </td>
                               <td className="p-4">
-                                  <div className="font-mono text-sm font-bold text-blue-600 flex items-center gap-1">
-                                      <Tag size={12}/> {item.opLot}
+                                  <div className={`font-mono text-sm font-bold flex items-center gap-1 ${isMaterialPurchase ? 'text-orange-600' : 'text-blue-600'}`}>
+                                      {isMaterialPurchase ? <ShoppingCart size={12}/> : <Tag size={12}/>} 
+                                      {item.opLot}
                                   </div>
                                   <div className="text-xs text-gray-500 truncate max-w-[150px]" title={item.productName}>
                                       {item.productName}
@@ -459,7 +576,7 @@ export const PaymentsModule: React.FC = () => {
                                   <div className="text-gray-700 font-medium">{item.serviceType}</div>
                                   <div className="text-xs text-gray-400 flex items-center gap-2">
                                       <span>Qtd: <b>{item.quantity}</b></span>
-                                      <span>Taxa: <b>{formatCurrency(item.unitPrice)}</b></span>
+                                      {item.unitPrice > 0 && <span>Taxa: <b>{formatCurrency(item.unitPrice)}</b></span>}
                                   </div>
                               </td>
                               <td className="p-4 text-right text-gray-500">
@@ -504,7 +621,7 @@ export const PaymentsModule: React.FC = () => {
                   </div>
                   <div className="p-6 space-y-5">
                       <div className="bg-gray-50 p-4 rounded-lg border text-center">
-                          <div className="text-xs text-gray-500 uppercase font-bold mb-1">Referente à OP {selectedPayment.opLot}</div>
+                          <div className="text-xs text-gray-500 uppercase font-bold mb-1">Referente à {selectedPayment.serviceType === 'Compra Material' ? 'Nota Fiscal' : 'OP'} {selectedPayment.opLot}</div>
                           <div className="text-3xl font-bold text-gray-800">
                               {formatCurrency(selectedPayment.total - selectedPayment.amountPaid)}
                           </div>

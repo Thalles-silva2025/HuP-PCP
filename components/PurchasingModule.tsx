@@ -6,13 +6,14 @@ import { Material, Partner, MaterialPurchase } from '../types';
 import { 
   ShoppingCart, Plus, Calendar, Search, DollarSign, Package, 
   Save, CheckSquare, ArrowRight, Loader2, History, TrendingUp, 
-  AlertTriangle, Layers, BarChart3, Archive, ChevronRight, X, ListPlus, Trash2, ClipboardCheck
+  AlertTriangle, Layers, BarChart3, Archive, ChevronRight, X, ListPlus, Trash2, ClipboardCheck, Filter, AlertOctagon, CheckCircle2
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '../contexts/ToastContext';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../services/supabase';
 import { useDialog } from '../contexts/DialogContext';
+import { ModernDatePicker } from './ModernDatePicker';
 
 // Helper for Color Style
 const getColorStyle = (colorName: string) => {
@@ -49,12 +50,15 @@ export const PurchasingModule: React.FC = () => {
   const { data: purchases = [], isLoading: loadingPurchases } = useQuery({ queryKey: ['purchases'], queryFn: PurchasingService.getPurchases });
   const { data: partners = [] } = useQuery({ queryKey: ['partners'], queryFn: ApiService.getPartners });
   
-  const suppliers = partners.map(p => p.name);
+  // FILTER: Only show suppliers (Fornecedor)
+  const suppliers = partners.filter(p => p.type === 'Fornecedor').map(p => p.name);
 
   // --- PURCHASING FORM STATE (HEADER) ---
+  const today = new Date().toISOString().split('T')[0];
   const [headerForm, setHeaderForm] = useState({
       supplier: '',
-      purchaseDate: new Date().toISOString().split('T')[0],
+      purchaseDate: today,
+      dueDate: '', // NEW: Due Date
       invoiceNumber: '',
       createPayment: true
   });
@@ -71,6 +75,14 @@ export const PurchasingModule: React.FC = () => {
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // --- FILTER STATE ---
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PENDING' | 'DIFF' | 'COMPLETED'>('ALL');
+  const [dateRange, setDateRange] = useState({
+      start: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      end: new Date(),
+      label: 'Este Mês'
+  });
+
   // --- VERIFICATION MODAL STATE ---
   const [verifyModalOpen, setVerifyModalOpen] = useState(false);
   const [purchaseToVerify, setPurchaseToVerify] = useState<MaterialPurchase | null>(null);
@@ -81,12 +93,37 @@ export const PurchasingModule: React.FC = () => {
   const [inventorySearch, setInventorySearch] = useState('');
   const [selectedInventoryItem, setSelectedInventoryItem] = useState<Material | null>(null);
 
-  // --- DERIVED STATE (KPIs) ---
+  // --- DERIVED STATE (KPIs & FILTERING) ---
   const kpiStats = useMemo(() => {
       const totalSpend = purchases.reduce((acc, p) => acc + p.totalCost, 0);
       const pendingCount = purchases.filter(p => p.status === 'Pendente').length;
-      return { totalSpend, pendingCount };
+      const diffCount = purchases.filter(p => p.status === 'Concluido' && p.originalQuantity !== p.quantity).length;
+      return { totalSpend, pendingCount, diffCount };
   }, [purchases]);
+
+  const filteredPurchases = useMemo(() => {
+      return purchases.filter(p => {
+          // Status Filter
+          if (statusFilter === 'PENDING' && p.status !== 'Pendente') return false;
+          if (statusFilter === 'COMPLETED' && p.status !== 'Concluido') return false;
+          if (statusFilter === 'DIFF') {
+              if (p.status !== 'Concluido') return false;
+              if (p.originalQuantity === p.quantity) return false;
+          }
+
+          // Date Filter
+          const pDate = new Date(p.purchaseDate);
+          pDate.setHours(0,0,0,0);
+          const start = new Date(dateRange.start); start.setHours(0,0,0,0);
+          const end = new Date(dateRange.end); end.setHours(23,59,59,999);
+          
+          if (dateRange.label !== 'Todo o Período') {
+              if (pDate < start || pDate > end) return false;
+          }
+
+          return true;
+      });
+  }, [purchases, statusFilter, dateRange]);
 
   const inventoryStats = useMemo(() => {
       const totalValue = materials.reduce((acc, m) => acc + (m.currentStock * m.costUnit), 0);
@@ -172,7 +209,6 @@ export const PurchasingModule: React.FC = () => {
           const { data: profile } = await supabase.from('user_profiles').select('organization_id').eq('id', user?.id).single();
           
           // Loop through cart and create purchases
-          // Note: Ideally this would be a single transaction, but for simplicity we loop
           for (const item of cart) {
               await PurchasingService.registerPurchase({
                   materialId: item.materialId,
@@ -182,7 +218,8 @@ export const PurchasingModule: React.FC = () => {
                   quantity: item.quantity,
                   unitPricePaid: item.unitPricePaid,
                   totalCost: item.quantity * item.unitPricePaid,
-                  colorBreakdown: item.colorBreakdown
+                  colorBreakdown: item.colorBreakdown,
+                  dueDate: headerForm.dueDate // NEW
               }, {
                   createPayment: headerForm.createPayment,
                   organizationId: profile?.organization_id
@@ -195,7 +232,7 @@ export const PurchasingModule: React.FC = () => {
           
           // Reset All
           setCart([]);
-          setHeaderForm({ supplier: '', purchaseDate: new Date().toISOString().split('T')[0], invoiceNumber: '', createPayment: true });
+          setHeaderForm({ supplier: '', purchaseDate: today, dueDate: '', invoiceNumber: '', createPayment: true });
           setActiveTab('list');
 
       } catch (error: any) {
@@ -275,7 +312,7 @@ export const PurchasingModule: React.FC = () => {
         </div>
 
         {/* =====================================================================================
-            MODULE 1: PURCHASING & RECEIVING (New Flow)
+            MODULE 1: PURCHASING & RECEIVING
            ===================================================================================== */}
         {currentModule === 'purchasing' && (
             <div className="animate-slide-in">
@@ -294,14 +331,36 @@ export const PurchasingModule: React.FC = () => {
 
                 {activeTab === 'list' && (
                     <>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                            <div className="bg-white p-5 rounded-xl border-l-4 border-teal-500 shadow-sm">
-                                <div className="text-xs font-bold text-teal-600 uppercase mb-1">Total Comprado (Geral)</div>
+                        {/* KPI CARDS - CLICKABLE FILTERS */}
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                            <div 
+                                onClick={() => setStatusFilter('ALL')}
+                                className={`bg-white p-5 rounded-xl border-l-4 border-teal-500 shadow-sm cursor-pointer hover:shadow-md transition-all ${statusFilter === 'ALL' ? 'ring-2 ring-teal-400' : ''}`}
+                            >
+                                <div className="text-xs font-bold text-teal-600 uppercase mb-1">Total Comprado</div>
                                 <div className="text-2xl font-bold text-gray-900">R$ {kpiStats.totalSpend.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</div>
                             </div>
-                            <div className="bg-white p-5 rounded-xl border-l-4 border-orange-500 shadow-sm">
+                            <div 
+                                onClick={() => setStatusFilter('PENDING')}
+                                className={`bg-white p-5 rounded-xl border-l-4 border-orange-500 shadow-sm cursor-pointer hover:shadow-md transition-all ${statusFilter === 'PENDING' ? 'ring-2 ring-orange-400' : ''}`}
+                            >
                                 <div className="text-xs font-bold text-orange-600 uppercase mb-1">Pendente Conferência</div>
                                 <div className="text-2xl font-bold text-gray-900">{kpiStats.pendingCount} <span className="text-sm text-gray-400 font-normal">itens</span></div>
+                            </div>
+                            <div 
+                                onClick={() => setStatusFilter('DIFF')}
+                                className={`bg-white p-5 rounded-xl border-l-4 border-red-500 shadow-sm cursor-pointer hover:shadow-md transition-all ${statusFilter === 'DIFF' ? 'ring-2 ring-red-400' : ''}`}
+                            >
+                                <div className="text-xs font-bold text-red-600 uppercase mb-1">Divergências (Nota vs Real)</div>
+                                <div className="text-2xl font-bold text-gray-900">{kpiStats.diffCount} <span className="text-sm text-gray-400 font-normal">itens</span></div>
+                            </div>
+                            <div className="flex items-center justify-center p-4">
+                                <ModernDatePicker 
+                                    startDate={dateRange.start}
+                                    endDate={dateRange.end}
+                                    label={dateRange.label}
+                                    onChange={(range) => setDateRange({start: range.start, end: range.end, label: range.label || 'Personalizado'})}
+                                />
                             </div>
                         </div>
 
@@ -313,17 +372,26 @@ export const PurchasingModule: React.FC = () => {
                                         <th className="p-4">Material</th>
                                         <th className="p-4">Fornecedor</th>
                                         <th className="p-4 text-center">Qtd Nota</th>
+                                        <th className="p-4 text-right">Valor Total</th>
                                         <th className="p-4 text-center">Status</th>
                                         <th className="p-4 text-right">Ação</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y">
-                                    {purchases.map((p) => (
+                                    {filteredPurchases.map((p) => (
                                         <tr key={p.id} className="hover:bg-gray-50">
                                             <td className="p-4 text-gray-500">{new Date(p.purchaseDate).toLocaleDateString()}</td>
                                             <td className="p-4 font-bold text-gray-800">{p.materialName} <span className="font-normal text-xs text-gray-400 block">{p.materialCode}</span></td>
                                             <td className="p-4 text-gray-700">{p.supplier}</td>
-                                            <td className="p-4 text-center font-bold">{p.quantity}</td>
+                                            <td className="p-4 text-center font-bold">
+                                                {p.originalQuantity || p.quantity}
+                                                {p.status === 'Concluido' && p.originalQuantity !== p.quantity && (
+                                                    <span className="block text-[10px] text-red-500 font-bold">Real: {p.quantity}</span>
+                                                )}
+                                            </td>
+                                            <td className="p-4 text-right text-gray-700 font-medium">
+                                                R$ {p.totalCost.toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+                                            </td>
                                             <td className="p-4 text-center">
                                                 <span className={`px-2 py-1 rounded text-xs font-bold ${p.status === 'Concluido' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
                                                     {p.status === 'Concluido' ? 'Conferido' : 'Pendente'}
@@ -344,8 +412,8 @@ export const PurchasingModule: React.FC = () => {
                                             </td>
                                         </tr>
                                     ))}
-                                    {purchases.length === 0 && (
-                                        <tr><td colSpan={6} className="p-12 text-center text-gray-400">Nenhuma compra registrada.</td></tr>
+                                    {filteredPurchases.length === 0 && (
+                                        <tr><td colSpan={7} className="p-12 text-center text-gray-400">Nenhuma compra encontrada para os filtros selecionados.</td></tr>
                                     )}
                                 </tbody>
                             </table>
@@ -364,12 +432,22 @@ export const PurchasingModule: React.FC = () => {
                                 <div className="grid grid-cols-2 gap-4">
                                     <div className="col-span-2">
                                         <label className="block text-xs font-bold text-gray-500 mb-1">Fornecedor</label>
-                                        <input className="w-full border rounded p-2" list="suppliers-list" value={headerForm.supplier} onChange={e => setHeaderForm({...headerForm, supplier: e.target.value})} placeholder="Busque o fornecedor..." />
-                                        <datalist id="suppliers-list">{suppliers.map(s => <option key={s} value={s} />)}</datalist>
+                                        <select 
+                                            className="w-full border rounded p-2 bg-white" 
+                                            value={headerForm.supplier} 
+                                            onChange={e => setHeaderForm({...headerForm, supplier: e.target.value})}
+                                        >
+                                            <option value="">Selecione um fornecedor cadastrado...</option>
+                                            {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
                                     </div>
                                     <div>
                                         <label className="block text-xs font-bold text-gray-500 mb-1">Data Emissão</label>
                                         <input type="date" className="w-full border rounded p-2" value={headerForm.purchaseDate} onChange={e => setHeaderForm({...headerForm, purchaseDate: e.target.value})} />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 mb-1">Data Vencimento (Boleto)</label>
+                                        <input type="date" className="w-full border rounded p-2" value={headerForm.dueDate} onChange={e => setHeaderForm({...headerForm, dueDate: e.target.value})} />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-bold text-gray-500 mb-1">Número Nota</label>
@@ -534,7 +612,7 @@ export const PurchasingModule: React.FC = () => {
                                 autoFocus
                             />
                             {verifyQty !== purchaseToVerify.quantity && (
-                                <p className="text-xs text-red-500 mt-1 font-bold">Diferença: {verifyQty - purchaseToVerify.quantity}</p>
+                                <p className="text-xs text-red-500 mt-1 font-bold flex items-center gap-1"><AlertOctagon size={12}/> Divergência: {verifyQty - purchaseToVerify.quantity}</p>
                             )}
                         </div>
 

@@ -6,7 +6,7 @@
 import React, { useState } from 'react';
 import { ApiService } from '../services/api';
 import { Material, MaterialType, UnitOfMeasure, StandardOperation, Partner, Color, StandardObservation, Warehouse, MaterialVariant } from '../types';
-import { Settings, Plus, Trash2, Database, Truck, Scissors, Box, Layers, Ruler, Tag, Save, Edit2, MapPin, Phone, Palette, StickyNote, Users, Power, X, ChevronDown, Check, AlertTriangle, Activity, Terminal, Loader2 } from 'lucide-react';
+import { Settings, Plus, Trash2, Database, Truck, Scissors, Box, Layers, Ruler, Tag, Save, Edit2, MapPin, Phone, Palette, StickyNote, Users, Power, X, ChevronDown, Check, AlertTriangle, Activity, Terminal, Loader2, FileText } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { SystemLogService, SystemLog } from '../services/SystemLogService';
 import { useDialog } from '../contexts/DialogContext'; // IMPORTED
@@ -72,7 +72,7 @@ export const SettingsModule: React.FC = () => {
   const { data: partners = [] } = useQuery({
       queryKey: ['partners'],
       queryFn: ApiService.getPartners,
-      enabled: activeTab === 'partners',
+      enabled: activeTab === 'partners' || activeTab === 'suppliers', // Also used for Suppliers
       staleTime: 1000 * 60 * 5
   });
 
@@ -301,32 +301,22 @@ export const SettingsModule: React.FC = () => {
             // Loop para criar/atualizar cada cor como um material INDIVIDUAL
             for (let i = 0; i < editingMaterial.variants.length; i++) {
                 const variant = editingMaterial.variants[i];
-                
-                // Lógica Especial: O primeiro item da lista herda o ID do material que está sendo editado
-                // Isso "transforma" o material principal na primeira variante, e cria novos para as demais.
-                // Isso satisfaz: "ELIMINANDO O PRINCIPAL QUE ERA ANTERIOMENTE" (substituindo-o por um específico)
                 const targetId = (i === 0 && editingMaterial.id) ? editingMaterial.id : undefined;
-
-                // FIX: Gerar código ÚNICO para cada variação para evitar erro de Unique Constraint do Banco
-                // Ex: TEC001 -> TEC001-AZU-1, TEC001-VER-2
                 const colorSuffix = variant.name.substring(0, 3).toUpperCase().replace(/[^A-Z0-9]/g, 'X');
                 const uniqueVariantCode = `${baseCode}-${colorSuffix}-${i + 1}`;
 
                 await ApiService.saveMaterial({
                     ...editingMaterial,
-                    id: targetId, // Mantém ID para o primeiro, cria novo para os outros (undefined = INSERT)
+                    id: targetId, 
                     name: `${baseName} - ${variant.name}`,
                     code: uniqueVariantCode,
                     currentStock: variant.stock,
-                    hasColors: false, // Agora é um material específico, sem variações aninhadas
-                    variants: [] // Limpa variantes pois foi desmembrado
+                    hasColors: false, 
+                    variants: [] 
                 });
             }
-            
             addToast({ type: 'success', title: 'Sucesso', message: `Material desmembrado em ${editingMaterial.variants.length} itens individuais.` });
-
         } else {
-            // SALVAMENTO PADRÃO (SEM CORES)
             let finalStock = editingMaterial.currentStock || 0;
             await ApiService.saveMaterial({
                 ...editingMaterial,
@@ -376,7 +366,16 @@ export const SettingsModule: React.FC = () => {
 
       setIsSubmitting(true);
       try {
-          const newPartner: Partner = { id: editingPartner.id || '', name: editingPartner.name, type: editingPartner.type || 'Facção', contractType: editingPartner.contractType || 'PJ', address: editingPartner.address, phone: editingPartner.phone, defaultRate: editingPartner.defaultRate || 0 };
+          const newPartner: Partner = { 
+              id: editingPartner.id || '', 
+              name: editingPartner.name, 
+              type: editingPartner.type || 'Facção', 
+              contractType: editingPartner.contractType || 'PJ', 
+              address: editingPartner.address, 
+              phone: editingPartner.phone, 
+              defaultRate: editingPartner.defaultRate || 0,
+              observations: editingPartner.observations // NEW FIELD
+          };
           await ApiService.savePartner(newPartner);
           queryClient.invalidateQueries({ queryKey: ['partners'] });
           setIsPartnerModalOpen(false); setEditingPartner({}); addToast({ type: 'success', title: 'Salvo', message: 'Parceiro salvo com sucesso.' });
@@ -384,7 +383,17 @@ export const SettingsModule: React.FC = () => {
       finally { setIsSubmitting(false); }
   };
 
-  const openPartnerModal = (partner?: Partner) => { setEditingPartner(partner || { type: 'Facção', contractType: 'PJ' }); setIsPartnerModalOpen(true); };
+  const openPartnerModal = (partner?: Partner, typeConstraint?: Partner['type']) => { 
+      if (partner) {
+          setEditingPartner(partner);
+      } else {
+          setEditingPartner({ 
+              type: typeConstraint || 'Facção', 
+              contractType: 'PJ' 
+          }); 
+      }
+      setIsPartnerModalOpen(true); 
+  };
   
   const handleSaveWarehouse = async (e: React.FormEvent) => { 
       e.preventDefault(); 
@@ -407,12 +416,29 @@ export const SettingsModule: React.FC = () => {
   };
   const openWarehouseModal = (wh?: Warehouse) => { setEditingWarehouse(wh || { type: 'Interno' }); setIsWarehouseModalOpen(true); };
 
+  // New: Handle Close with Discard/Save Option
+  const handleClosePartnerModal = async () => {
+      if (editingPartner.name || editingPartner.phone || editingPartner.address) {
+          const result = await dialog.confirm({
+              title: 'Descartar alterações?',
+              message: 'Você tem dados não salvos. Deseja sair sem salvar?',
+              type: 'warning',
+              confirmText: 'Sair sem Salvar',
+              cancelText: 'Continuar Editando'
+          });
+          if (!result) return;
+      }
+      setIsPartnerModalOpen(false);
+      setEditingPartner({});
+  };
+
   return (
     <div className="space-y-6 relative">
       <div><h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2"><Database className="text-gray-600" /> Cadastros Gerais</h1><p className="text-gray-500 text-sm">Gerenciamento de dados mestres e tabelas auxiliares.</p></div>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <div className="bg-white rounded-xl shadow-sm border p-2 h-fit">
            <button onClick={() => setActiveTab('materials')} className={`w-full text-left p-3 rounded-lg flex items-center gap-3 transition-colors ${activeTab === 'materials' ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}><Layers size={18}/> Insumos & Tecidos</button>
+           <button onClick={() => setActiveTab('suppliers')} className={`w-full text-left p-3 rounded-lg flex items-center gap-3 transition-colors ${activeTab === 'suppliers' ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}><Truck size={18}/> Fornecedores</button>
            <button onClick={() => setActiveTab('ops')} className={`w-full text-left p-3 rounded-lg flex items-center gap-3 transition-colors ${activeTab === 'ops' ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}><Settings size={18}/> Sequência Operacional</button>
            <button onClick={() => setActiveTab('sizes')} className={`w-full text-left p-3 rounded-lg flex items-center gap-3 transition-colors ${activeTab === 'sizes' ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}><Ruler size={18}/> Tamanhos & Grade</button>
            <button onClick={() => setActiveTab('colors')} className={`w-full text-left p-3 rounded-lg flex items-center gap-3 transition-colors ${activeTab === 'colors' ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}><Palette size={18}/> Cores & Variantes</button>
@@ -425,31 +451,7 @@ export const SettingsModule: React.FC = () => {
         </div>
 
         <div className="md:col-span-3 bg-white rounded-xl shadow-sm border p-6 min-h-[500px]">
-          {/* ... (Existing Tabs content logic, mostly unchanged, just using new delete handler) ... */}
-          {/* ... */}
-          {activeTab === 'logs' && (
-              <div className="animate-fade-in">
-                  <div className="flex justify-between items-center mb-6 border-b pb-4">
-                      <div><h2 className="text-xl font-bold flex items-center gap-2 text-gray-800"><Terminal className="text-orange-600"/> Logs de Sistema & Erros</h2><p className="text-gray-500 text-sm">Histórico de comunicação com o Banco de Dados.</p></div>
-                      <div className="flex gap-2"><button onClick={() => refetchLogs()} className="text-gray-600 hover:text-blue-600 p-2"><Activity size={18}/></button><button onClick={handleClearLogs} className="text-red-500 hover:text-red-700 px-3 py-1 border border-red-200 rounded text-sm font-bold bg-red-50">Limpar Histórico</button></div>
-                  </div>
-                  {/* ... logs rendering ... */}
-                  {loadingLogs ? (
-                      <div className="text-center py-12 text-gray-400">Carregando logs...</div>
-                  ) : (
-                      <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                          {systemLogs.length === 0 && <div className="text-center text-gray-400 py-12">Nenhum log registrado recentemente.</div>}
-                          {systemLogs.map((log) => (
-                              <div key={log.id} className={`p-4 rounded-lg border-l-4 shadow-sm text-sm ${log.type === 'error' ? 'border-red-500 bg-red-50' : log.type === 'success' ? 'border-green-500 bg-green-50' : 'border-blue-500 bg-blue-50'}`}>
-                                  <div className="flex justify-between items-start mb-1"><span className="font-bold uppercase tracking-wide flex items-center gap-2">{log.type === 'error' ? <AlertTriangle size={14}/> : <Check size={14}/>} {log.action}</span><span className="text-xs text-gray-500">{new Date(log.timestamp).toLocaleString()}</span></div>
-                                  <div className="text-gray-700 font-mono text-xs break-all">{log.details}</div>
-                              </div>
-                          ))}
-                      </div>
-                  )}
-              </div>
-          )}
-
+          
           {activeTab === 'materials' && (
             <div>
               {/* ... Material Form ... */}
@@ -458,7 +460,6 @@ export const SettingsModule: React.FC = () => {
                 <form onSubmit={handleSaveMaterial} className="space-y-4 bg-gray-50 p-6 rounded-xl border h-fit">
                     <div className="flex justify-between items-center"><h3 className="font-bold text-gray-700 mb-4">{editingMaterial.id ? 'Editar Item' : 'Novo Item'}</h3>{editingMaterial.id && <button type="button" onClick={() => setEditingMaterial({ type: MaterialType.FABRIC, unit: UnitOfMeasure.KG, status: 'Ativo', hasColors: false, variants: [] })} className="text-xs text-blue-600 underline">Limpar</button>}</div>
                     
-                    {/* Alterado para grid de 3 colunas para acomodar o novo campo */}
                     <div className="grid grid-cols-3 gap-4">
                         <div>
                             <label className="block text-sm font-bold text-gray-700 mb-1">Código</label>
@@ -468,7 +469,6 @@ export const SettingsModule: React.FC = () => {
                             <label className="block text-sm font-bold text-gray-700 mb-1">Tipo</label>
                             <select className="w-full border rounded p-2" value={editingMaterial.type} onChange={e => setEditingMaterial({...editingMaterial, type: e.target.value as MaterialType})}>{Object.values(MaterialType).map(t => <option key={t} value={t}>{t}</option>)}</select>
                         </div>
-                        {/* NOVO CAMPO: Etapa de Uso */}
                         <div>
                             <label className="block text-sm font-bold text-gray-700 mb-1">Etapa de Uso</label>
                             <select 
@@ -493,7 +493,13 @@ export const SettingsModule: React.FC = () => {
           )}
 
           {activeTab === 'partners' && (
-            <div><div className="flex justify-between items-center mb-4 border-b pb-2"><h2 className="text-xl font-bold">Parceiros de Serviço (Facções, Cortadores, Revisores)</h2><button onClick={() => openPartnerModal()} className="bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2"><Plus size={16}/> Novo Parceiro</button></div><ul className="space-y-2">{partners.map((sub) => (<li key={sub.id} className="p-4 border rounded-lg flex items-center justify-between hover:bg-gray-50 group"><div className="flex items-center gap-4"><div className={`p-3 rounded text-white font-bold text-xs uppercase w-20 text-center ${sub.type === 'Facção' ? 'bg-indigo-500' : sub.type === 'Cortador' ? 'bg-orange-500' : 'bg-green-600'}`}>{sub.type}</div><div><div className="font-bold text-gray-800 flex items-center gap-2">{sub.name}<span className={`text-[10px] border px-1 rounded ${sub.contractType === 'PJ' ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>{sub.contractType}</span></div><div className="text-xs text-gray-500 flex items-center gap-3 mt-1">{sub.phone && <span className="flex items-center gap-1"><Phone size={12}/> {sub.phone}</span>}{sub.address && <span className="flex items-center gap-1"><MapPin size={12}/> {sub.address}</span>}</div></div></div><div className="flex items-center gap-4">{sub.defaultRate && sub.defaultRate > 0 && (<div className="text-right mr-4"><div className="text-xs text-gray-400 uppercase">Taxa Padrão</div><div className="font-bold text-green-700">R$ {sub.defaultRate.toFixed(2)}</div></div>)}<div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openPartnerModal(sub)} className="p-2 bg-blue-100 text-blue-600 rounded hover:bg-blue-200"><Edit2 size={16}/></button><button onClick={() => handleDelete(sub.id, 'partner', sub.name)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button></div></div></li>))}</ul></div>
+            <div><div className="flex justify-between items-center mb-4 border-b pb-2"><h2 className="text-xl font-bold">Parceiros de Serviço (Facções, Cortadores, Revisores)</h2><button onClick={() => openPartnerModal(undefined, 'Facção')} className="bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2"><Plus size={16}/> Novo Parceiro</button></div>
+            <ul className="space-y-2">{partners.filter(p => p.type !== 'Fornecedor').map((sub) => (<li key={sub.id} className="p-4 border rounded-lg flex items-center justify-between hover:bg-gray-50 group"><div className="flex items-center gap-4"><div className={`p-3 rounded text-white font-bold text-xs uppercase w-20 text-center ${sub.type === 'Facção' ? 'bg-indigo-500' : sub.type === 'Cortador' ? 'bg-orange-500' : 'bg-green-600'}`}>{sub.type}</div><div><div className="font-bold text-gray-800 flex items-center gap-2">{sub.name}<span className={`text-[10px] border px-1 rounded ${sub.contractType === 'PJ' ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>{sub.contractType}</span></div><div className="text-xs text-gray-500 flex items-center gap-3 mt-1">{sub.phone && <span className="flex items-center gap-1"><Phone size={12}/> {sub.phone}</span>}{sub.address && <span className="flex items-center gap-1"><MapPin size={12}/> {sub.address}</span>}</div></div></div><div className="flex items-center gap-4">{sub.defaultRate && sub.defaultRate > 0 && (<div className="text-right mr-4"><div className="text-xs text-gray-400 uppercase">Taxa Padrão</div><div className="font-bold text-green-700">R$ {sub.defaultRate.toFixed(2)}</div></div>)}<div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openPartnerModal(sub)} className="p-2 bg-blue-100 text-blue-600 rounded hover:bg-blue-200"><Edit2 size={16}/></button><button onClick={() => handleDelete(sub.id, 'partner', sub.name)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button></div></div></li>))}</ul></div>
+          )}
+
+          {activeTab === 'suppliers' && (
+            <div><div className="flex justify-between items-center mb-4 border-b pb-2"><h2 className="text-xl font-bold">Fornecedores de Materiais</h2><button onClick={() => openPartnerModal(undefined, 'Fornecedor')} className="bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2"><Plus size={16}/> Novo Fornecedor</button></div>
+            <ul className="space-y-2">{partners.filter(p => p.type === 'Fornecedor').map((sup) => (<li key={sup.id} className="p-4 border rounded-lg flex items-center justify-between hover:bg-gray-50 group"><div className="flex items-center gap-4"><div className="p-3 rounded text-white font-bold text-xs uppercase w-20 text-center bg-teal-600">Fornecedor</div><div><div className="font-bold text-gray-800 flex items-center gap-2">{sup.name}</div><div className="text-xs text-gray-500 flex items-center gap-3 mt-1">{sup.phone && <span className="flex items-center gap-1"><Phone size={12}/> {sup.phone}</span>}{sup.address && <span className="flex items-center gap-1"><MapPin size={12}/> {sup.address}</span>}</div></div></div><div className="flex items-center gap-4"><div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openPartnerModal(sup)} className="p-2 bg-blue-100 text-blue-600 rounded hover:bg-blue-200"><Edit2 size={16}/></button><button onClick={() => handleDelete(sup.id, 'partner', sup.name)} className="p-2 bg-red-100 text-red-600 rounded hover:bg-red-200"><Trash2 size={16}/></button></div></div></li>))}</ul></div>
           )}
 
            {activeTab === 'warehouses' && (
@@ -504,10 +510,32 @@ export const SettingsModule: React.FC = () => {
           {activeTab === 'colors' && (<div><h2 className="text-xl font-bold mb-4 border-b pb-2">Cadastro de Cores</h2><form onSubmit={handleAddColor} className="flex gap-2 mb-6 items-end"><div className="flex-1"><label className="block text-xs font-bold text-gray-500 mb-1">Nome da Cor</label><input className="w-full border rounded-lg p-3" placeholder="Ex: Azul Bebê, Marsala" value={newColorName} onChange={e => setNewColorName(e.target.value)}/></div><div><label className="block text-xs font-bold text-gray-500 mb-1">Visual</label><input type="color" className="h-[50px] w-16 border rounded cursor-pointer" value={newColorHex} onChange={e => setNewColorHex(e.target.value)}/></div><button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50">Adicionar</button></form><div className="grid grid-cols-2 md:grid-cols-4 gap-4">{colors.map(c => (<div key={c.id} className="flex items-center justify-between bg-gray-50 px-3 py-2 rounded border"><div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full border border-gray-200 shadow-sm" style={{backgroundColor: c.hex}}></div><span className="font-medium text-gray-800">{c.name}</span></div><button onClick={() => handleDelete(c.id, 'color', c.name)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div>))}</div></div>)}
           {activeTab === 'observations' && (<div><h2 className="text-xl font-bold mb-4 border-b pb-2">Observações Padrão de Produção</h2><form onSubmit={handleAddObs} className="flex gap-2 mb-6 items-end"><div className="flex-1"><label className="block text-xs font-bold text-gray-500 mb-1">Texto da Observação</label><input className="w-full border rounded-lg p-3" placeholder="Ex: Descanso de tecido de 24h" value={newObsText} onChange={e => setNewObsText(e.target.value)}/></div><div className="w-40"><label className="block text-xs font-bold text-gray-500 mb-1">Categoria</label><select className="w-full border rounded-lg p-3" value={newObsCategory} onChange={(e: any) => setNewObsCategory(e.target.value)}><option>Corte</option><option>Costura</option><option>Geral</option></select></div><button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50">Adicionar</button></form><div className="space-y-2">{observations.map(obs => (<div key={obs.id} className="flex justify-between items-center bg-gray-50 p-3 rounded border"><div className="flex-1"><div className="text-xs text-blue-600 font-bold uppercase mb-1">{obs.category}</div><span className="font-medium text-gray-800">{obs.text}</span></div><button onClick={() => handleDelete(obs.id, 'obs', 'Observação')} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={18}/></button></div>))}</div></div>)}
           {activeTab === 'units' && (<div><h2 className="text-xl font-bold mb-4 border-b pb-2">Unidades de Medida</h2><form onSubmit={e => handleAdd(e, 'unit')} className="flex gap-2 mb-6"><input className="flex-1 border rounded-lg p-3" placeholder="Nova unidade (ex: caixa, litro)" value={newInput} onChange={e => setNewInput(e.target.value)}/><button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white px-6 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50">Adicionar</button></form><div className="space-y-2">{units.map(u => (<div key={u} className="flex justify-between items-center bg-gray-50 p-3 rounded border"><span className="font-medium text-gray-800">{u}</span><button onClick={() => handleDelete(u, 'unit', u)} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={18}/></button></div>))}</div></div>)}
+          
+          {activeTab === 'logs' && (
+              <div className="animate-fade-in">
+                  <div className="flex justify-between items-center mb-6 border-b pb-4">
+                      <div><h2 className="text-xl font-bold flex items-center gap-2 text-gray-800"><Terminal className="text-orange-600"/> Logs de Sistema & Erros</h2><p className="text-gray-500 text-sm">Histórico de comunicação com o Banco de Dados.</p></div>
+                      <div className="flex gap-2"><button onClick={() => refetchLogs()} className="text-gray-600 hover:text-blue-600 p-2"><Activity size={18}/></button><button onClick={handleClearLogs} className="text-red-500 hover:text-red-700 px-3 py-1 border border-red-200 rounded text-sm font-bold bg-red-50">Limpar Histórico</button></div>
+                  </div>
+                  {loadingLogs ? (
+                      <div className="text-center py-12 text-gray-400">Carregando logs...</div>
+                  ) : (
+                      <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                          {systemLogs.length === 0 && <div className="text-center text-gray-400 py-12">Nenhum log registrado recentemente.</div>}
+                          {systemLogs.map((log) => (
+                              <div key={log.id} className={`p-4 rounded-lg border-l-4 shadow-sm text-sm ${log.type === 'error' ? 'border-red-500 bg-red-50' : log.type === 'success' ? 'border-green-500 bg-green-50' : 'border-blue-500 bg-blue-50'}`}>
+                                  <div className="flex justify-between items-start mb-1"><span className="font-bold uppercase tracking-wide flex items-center gap-2">{log.type === 'error' ? <AlertTriangle size={14}/> : <Check size={14}/>} {log.action}</span><span className="text-xs text-gray-500">{new Date(log.timestamp).toLocaleString()}</span></div>
+                                  <div className="text-gray-700 font-mono text-xs break-all">{log.details}</div>
+                              </div>
+                          ))}
+                      </div>
+                  )}
+              </div>
+          )}
         </div>
       </div>
 
-      {isPartnerModalOpen && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md"><h3 className="font-bold text-lg mb-4">{editingPartner.id ? 'Editar Cadastro' : 'Novo Cadastro'}</h3><form onSubmit={handleSavePartner} className="space-y-4"><div><label className="block text-sm font-bold text-gray-700 mb-1">Nome do Parceiro</label><input className="w-full border rounded p-2" value={editingPartner.name || ''} onChange={e => setEditingPartner({...editingPartner, name: e.target.value})} required placeholder="Razão Social ou Nome"/></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm font-bold text-gray-700 mb-1">Tipo de Serviço</label><select className="w-full border rounded p-2" value={editingPartner.type} onChange={(e: any) => setEditingPartner({...editingPartner, type: e.target.value})}><option value="Facção">Facção</option><option value="Cortador">Cortador</option><option value="Revisão">Revisão</option><option value="Embalagem">Embalagem</option><option value="Outro">Outro</option></select></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Regime Contratual</label><div className="flex gap-2 mt-2"><label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="contractType" value="PJ" checked={editingPartner.contractType === 'PJ'} onChange={() => setEditingPartner({...editingPartner, contractType: 'PJ'})}/><span className="text-sm font-bold">PJ</span></label><label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="contractType" value="CLT" checked={editingPartner.contractType === 'CLT'} onChange={() => setEditingPartner({...editingPartner, contractType: 'CLT'})}/><span className="text-sm font-bold">CLT</span></label></div></div></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Taxa / Preço Padrão (Por Peça)</label><input type="number" step="0.01" className="w-full border rounded p-2" value={editingPartner.defaultRate || ''} onChange={e => setEditingPartner({...editingPartner, defaultRate: parseFloat(e.target.value)})} placeholder="0.00"/><p className="text-xs text-gray-500 mt-1">Usado para cálculo automático de pagamentos.</p></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Telefone / Contato</label><input className="w-full border rounded p-2" value={editingPartner.phone || ''} onChange={e => setEditingPartner({...editingPartner, phone: e.target.value})}/></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Endereço Completo</label><textarea className="w-full border rounded p-2 h-20" value={editingPartner.address || ''} onChange={e => setEditingPartner({...editingPartner, address: e.target.value})}/></div><div className="flex justify-end gap-2 pt-4"><button type="button" onClick={() => setIsPartnerModalOpen(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded">Cancelar</button><button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">Salvar</button></div></form></div></div>)}
+      {isPartnerModalOpen && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md"><h3 className="font-bold text-lg mb-4">{editingPartner.id ? 'Editar Cadastro' : 'Novo Cadastro'}</h3><form onSubmit={handleSavePartner} className="space-y-4"><div><label className="block text-sm font-bold text-gray-700 mb-1">Nome / Razão Social</label><input className="w-full border rounded p-2" value={editingPartner.name || ''} onChange={e => setEditingPartner({...editingPartner, name: e.target.value})} required placeholder="Razão Social ou Nome"/></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm font-bold text-gray-700 mb-1">Tipo</label><select className="w-full border rounded p-2" value={editingPartner.type} onChange={(e: any) => setEditingPartner({...editingPartner, type: e.target.value})} disabled={editingPartner.type === 'Fornecedor' && !editingPartner.id}><option value="Facção">Facção</option><option value="Cortador">Cortador</option><option value="Revisão">Revisão</option><option value="Embalagem">Embalagem</option><option value="Fornecedor">Fornecedor</option><option value="Outro">Outro</option></select></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Regime Contratual</label><div className="flex gap-2 mt-2"><label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="contractType" value="PJ" checked={editingPartner.contractType === 'PJ'} onChange={() => setEditingPartner({...editingPartner, contractType: 'PJ'})}/><span className="text-sm font-bold">PJ</span></label><label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="contractType" value="CLT" checked={editingPartner.contractType === 'CLT'} onChange={() => setEditingPartner({...editingPartner, contractType: 'CLT'})}/><span className="text-sm font-bold">CLT</span></label></div></div></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Taxa / Preço Padrão (Por Peça)</label><input type="number" step="0.01" className="w-full border rounded p-2" value={editingPartner.defaultRate || ''} onChange={e => setEditingPartner({...editingPartner, defaultRate: parseFloat(e.target.value)})} placeholder="0.00"/><p className="text-xs text-gray-500 mt-1">Usado para cálculo automático de pagamentos.</p></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Telefone / Contato</label><input className="w-full border rounded p-2" value={editingPartner.phone || ''} onChange={e => setEditingPartner({...editingPartner, phone: e.target.value})}/></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Endereço Completo</label><textarea className="w-full border rounded p-2 h-20" value={editingPartner.address || ''} onChange={e => setEditingPartner({...editingPartner, address: e.target.value})}/></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Observações</label><textarea className="w-full border rounded p-2 h-20" placeholder="Dados bancários, horário de entrega, etc..." value={editingPartner.observations || ''} onChange={e => setEditingPartner({...editingPartner, observations: e.target.value})}/></div><div className="flex justify-end gap-2 pt-4"><button type="button" onClick={handleClosePartnerModal} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded">Cancelar</button><button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">Salvar</button></div></form></div></div>)}
       {isWarehouseModalOpen && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md"><div className="flex justify-between items-center mb-4"><h3 className="font-bold text-lg">{editingWarehouse.id ? 'Editar Depósito' : 'Novo Depósito'}</h3><button onClick={() => setIsWarehouseModalOpen(false)}><X size={20}/></button></div><form onSubmit={handleSaveWarehouse} className="space-y-4"><div><label className="block text-sm font-bold text-gray-700 mb-1">Nome do Local</label><input className="w-full border rounded p-2" value={editingWarehouse.name || ''} onChange={e => setEditingWarehouse({...editingWarehouse, name: e.target.value})} required placeholder="Ex: Loja Centro"/></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Localização / Endereço</label><input className="w-full border rounded p-2" value={editingWarehouse.location || ''} onChange={e => setEditingWarehouse({...editingWarehouse, location: e.target.value})}/></div><div><label className="block text-sm font-bold text-gray-700 mb-1">Tipo</label><select className="w-full border rounded p-2" value={editingWarehouse.type} onChange={(e: any) => setEditingWarehouse({...editingWarehouse, type: e.target.value})}><option>Interno</option><option>Loja</option><option>Expedição</option></select></div><div className="flex justify-end gap-2 pt-4"><button type="button" onClick={() => setIsWarehouseModalOpen(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded">Cancelar</button><button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">Salvar</button></div></form></div></div>)}
     </div>
   );

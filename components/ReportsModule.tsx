@@ -755,6 +755,13 @@ export const ReportsModule: React.FC = () => {
                     <div className="grid grid-cols-1 gap-6 animate-fade-in">
                         {getFinancialDeepDive().map((data) => {
                             const isExpanded = selectedFinancialOp === data.op.id;
+                            const chartData = [
+                                { name: 'Tecido', value: data.totalFabricSpent, fill: '#3b82f6' },
+                                { name: 'Mão Obra', value: data.laborSpent, fill: '#f59e0b' },
+                                { name: 'Desperdício', value: data.totalWasteCost, fill: '#ef4444' },
+                                { name: 'Lucro', value: data.margin, fill: '#10b981' },
+                            ];
+
                             return (
                                 <div key={data.op.id} className={`bg-white rounded-xl shadow-sm border transition-all ${isExpanded ? 'ring-2 ring-indigo-500 shadow-md' : 'hover:border-indigo-300'}`}>
                                     {/* Card Header (Clickable) */}
@@ -835,26 +842,14 @@ export const ReportsModule: React.FC = () => {
                                                 <h4 className="font-bold text-gray-700 mb-4 w-full text-left">Composição da Margem</h4>
                                                 <div className="w-full h-48">
                                                     <ResponsiveContainer width="100%" height="100%">
-                                                        <BarChart layout="vertical" data={[
-                                                            { name: 'Tecido', value: data.totalFabricSpent, fill: '#3b82f6' },
-                                                            { name: 'Mão Obra', value: data.laborSpent, fill: '#f59e0b' },
-                                                            { name: 'Desperdício', value: data.totalWasteCost, fill: '#ef4444' },
-                                                            { name: 'Lucro', value: data.margin, fill: '#10b981' },
-                                                        ]}>
+                                                        <BarChart layout="vertical" data={chartData}>
                                                             <XAxis type="number" hide/>
                                                             <YAxis type="category" dataKey="name" width={80} tick={{fontSize: 11}}/>
                                                             <Tooltip formatter={(val: number) => `R$ ${val.toLocaleString()}`}/>
                                                             <Bar dataKey="value" barSize={20} radius={[0, 4, 4, 0]}>
-                                                                {
-                                                                    [
-                                                                        { fill: '#3b82f6' },
-                                                                        { fill: '#f59e0b' },
-                                                                        { fill: '#ef4444' },
-                                                                        { fill: '#10b981' }
-                                                                    ].map((entry, index) => (
-                                                                        <Cell key={`cell-${index}`} fill={entry.fill} />
-                                                                    ))
-                                                                }
+                                                                {chartData.map((entry, index) => (
+                                                                    <Cell key={`cell-${index}`} fill={entry.fill} />
+                                                                ))}
                                                                 <LabelList dataKey="value" position="right" formatter={(val: number) => `R$ ${val.toFixed(0)}`} style={{fontSize: 11, fill: '#666'}}/>
                                                             </Bar>
                                                         </BarChart>
