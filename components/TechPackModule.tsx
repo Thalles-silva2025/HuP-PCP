@@ -1,19 +1,29 @@
 
 /**
- * 🔒 MÓDULO FICHA TÉCNICA
- * ATUALIZAÇÃO: Correção para Carregar sempre a ÚLTIMA VERSÃO (v19 > v1).
+ * 🛑 MÓDULO FICHA TÉCNICA - FROZEN (CONGELADO)
+ * ---------------------------------------------------
+ * 🔒 STATUS: CORE SYSTEM (CORAÇÃO DO SISTEMA)
+ * 📅 DATA DO BLOQUEIO: 25/05/2025
+ * 
+ * ATENÇÃO: Este arquivo atingiu estabilidade total e funcionalidade crítica.
+ * Nenhuma alteração lógica, visual ou de regra de negócio deve ser realizada aqui.
+ * Qualquer tentativa de modificação requer um protocolo de "Emergency Unlock".
+ * 
+ * Motivo: Estabilidade garantida para Engenharia de Produto e Custos.
  */
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Product, TechPack, Material, BOMItem, Operation, MaterialType, UnitOfMeasure, ProductStatus, MeasurementPoint, StandardOperation, Color, StandardObservation, Partner, ExtraCost, SalesType } from '../types';
+import { Product, TechPack, Material, BOMItem, Operation, MeasurementPoint, StandardObservation, ExtraCost, SalesType, ProductStatus } from '../types';
 import { ApiService } from '../services/api'; 
-import { Shirt, Layers, Settings2, Plus, Save, DollarSign, Trash2, ArrowLeft, PackagePlus, Search, Edit2, ChevronRight, ChevronLeft, Ruler, X, Eye, Printer, History, CheckCircle2, Upload, Camera, Scissors, Lock, Palette, StickyNote, BarChart3, AlertTriangle, Clock, CheckCircle, Image as ImageIcon, Flame, HelpCircle, AlertCircle, FileText, Download, UserCheck, CheckSquare, Square, TrendingUp, Zap, Star, Calculator, Coins, ListChecks, ArrowUpRight, ArrowDownRight, Activity, Tag, Box, Percent, CalendarDays, GitCommit, User, Quote, ShieldCheck, RefreshCw } from 'lucide-react';
+import { Shirt, Layers, Settings2, Plus, Save, DollarSign, Trash2, ArrowLeft, PackagePlus, Search, Edit2, ChevronRight, ChevronLeft, Ruler, X, Eye, Printer, CheckCircle2, Upload, Scissors, Lock, Palette, StickyNote, BarChart3, AlertTriangle, Clock, Image as ImageIcon, Flame, HelpCircle, AlertCircle, FileText, Download, CheckSquare, Square, TrendingUp, Calculator, ListChecks, ArrowUpRight, ArrowDownRight, Activity, Tag, Box, CalendarDays, GitCommit, User, Quote, ShieldCheck, RefreshCw, Power, Archive } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { SystemLogService } from '../services/SystemLogService';
+import { useToast } from '../contexts/ToastContext';
+import { useDialog } from '../contexts/DialogContext'; // IMPORTED DIALOG
 
 // ... (DecimalInput e SystemAlert components mantidos iguais) ...
-const DecimalInput = ({ value, onChange, placeholder, className, step = "0.001" }: any) => {
+const DecimalInput = ({ value, onChange, placeholder, className }: any) => {
     const [localValue, setLocalValue] = useState(value?.toString() || '');
     useEffect(() => {
         if (value !== undefined && value !== null && !isNaN(value)) {
@@ -138,6 +148,8 @@ const calculatePreviewFinancials = (techPack: TechPack) => {
 
 export const TechPackModule: React.FC = () => {
   const queryClient = useQueryClient();
+  const { addToast } = useToast(); // TOAST
+  const dialog = useDialog(); // DIALOG
 
   const { data: products = [], refetch: refetchProducts, isFetching: loadingProducts } = useQuery({ queryKey: ['products'], queryFn: ApiService.getProducts, staleTime: 1000 * 60 * 5 });
   const { data: materials = [] } = useQuery({ queryKey: ['materials'], queryFn: ApiService.getMaterials, staleTime: 1000 * 60 * 10 });
@@ -145,7 +157,6 @@ export const TechPackModule: React.FC = () => {
   const { data: allSizes = [] } = useQuery({ queryKey: ['standardSizes'], queryFn: ApiService.getStandardSizes, staleTime: Infinity });
   const { data: allColors = [] } = useQuery({ queryKey: ['colors'], queryFn: ApiService.getColors, staleTime: 1000 * 60 * 15 });
   const { data: allObs = [] } = useQuery({ queryKey: ['observations'], queryFn: ApiService.getObservations, staleTime: Infinity });
-  const { data: partners = [] } = useQuery({ queryKey: ['partners'], queryFn: ApiService.getPartners, staleTime: 1000 * 60 * 5 });
   
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [selectedTechPackId, setSelectedTechPackId] = useState<string | null>(null);
@@ -174,6 +185,9 @@ export const TechPackModule: React.FC = () => {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const [overheadRate, setOverheadRate] = useState<string>('');
 
+  // NEW: State for Product Tabs (Active/Inactive)
+  const [productTab, setProductTab] = useState<'active' | 'inactive'>('active');
+
   useEffect(() => {
       if (isEditing && formTechPack.extraCosts) {
           const overhead = formTechPack.extraCosts.find(c => c.name === 'Rateio Operacional (Custo Fixo)');
@@ -190,7 +204,22 @@ export const TechPackModule: React.FC = () => {
   };
 
   const colorsMap = useMemo(() => { const map: Record<string, string> = {}; allColors.forEach(c => map[c.name] = c.hex); return map; }, [allColors]);
-  const filteredProducts = products.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.sku.toLowerCase().includes(searchTerm.toLowerCase()));
+  
+  // UPDATED: Filtering logic based on Tabs
+  const filteredProducts = products.filter(p => {
+      const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.sku.toLowerCase().includes(searchTerm.toLowerCase());
+      const pStatus = p.status || ProductStatus.ACTIVE;
+      
+      const matchesTab = productTab === 'active' 
+          ? pStatus === ProductStatus.ACTIVE
+          : pStatus === ProductStatus.INACTIVE;
+
+      return matchesSearch && matchesTab;
+  });
+
+  const activeCount = products.filter(p => (p.status || ProductStatus.ACTIVE) === ProductStatus.ACTIVE).length;
+  const inactiveCount = products.filter(p => p.status === ProductStatus.INACTIVE).length;
+
   const toggleProductColor = (colorName: string) => { const currentColors = formProduct.colors || []; let newColors; if(currentColors.includes(colorName)) { newColors = currentColors.filter(c => c !== colorName); } else { newColors = [...currentColors, colorName]; } setFormProduct(prev => ({ ...prev, colors: newColors })); };
   const toggleProductActiveSize = (size: string) => { const currentSizes = formTechPack.activeSizes || []; let newSizes; if (currentSizes.includes(size)) { newSizes = currentSizes.filter(s => s !== size); } else { newSizes = [...currentSizes, size]; } newSizes.sort((a,b) => allSizes.indexOf(a) - allSizes.indexOf(b)); setFormTechPack(prev => ({ ...prev, activeSizes: newSizes })); };
   const toggleObservation = (obsId: string) => { const currentObs = formTechPack.standardObservations || []; let newObs; if (currentObs.includes(obsId)) { newObs = currentObs.filter(id => id !== obsId); } else { newObs = [...currentObs, obsId]; } setFormTechPack(prev => ({ ...prev, standardObservations: newObs })); };
@@ -209,7 +238,41 @@ export const TechPackModule: React.FC = () => {
               setSelectedProductIds([]);
           }
           await refreshData();
-      } catch (e: any) { alert(e.message); } finally { setDeleteConfirmation({isOpen: false, type: 'single'}); }
+          addToast({ type: 'success', title: 'Excluído', message: 'Produtos removidos com sucesso.' });
+      } catch (e: any) { 
+          // Tratamento específico de erro para dependência de OP
+          const msg = e.message.includes('ordens de produção ativas') 
+            ? 'Não é possível excluir: Existem OPs ativas para este produto. Desative-o em vez de excluir.' 
+            : e.message;
+          addToast({ type: 'error', title: 'Erro ao Excluir', message: msg }); 
+      } finally { setDeleteConfirmation({isOpen: false, type: 'single'}); }
+  };
+
+  const handleToggleStatus = async (product: Product, e: React.MouseEvent) => {
+      e.stopPropagation();
+      
+      const isActive = product.status === ProductStatus.ACTIVE;
+      const action = isActive ? 'Desativar' : 'Ativar';
+      const nextStatus = isActive ? ProductStatus.INACTIVE : ProductStatus.ACTIVE;
+
+      const confirmed = await dialog.confirm({
+          title: `${action} Produto?`,
+          message: `Você tem certeza que deseja ${action.toLowerCase()} o produto "${product.name}"? ${isActive ? 'Ele ficará oculto para novas produções.' : 'Ele voltará a aparecer nas listas.'}`,
+          type: isActive ? 'warning' : 'info',
+          confirmText: `Sim, ${action}`,
+          cancelText: 'Cancelar'
+      });
+
+      if (!confirmed) return;
+
+      try {
+          // Atualiza status localmente para feedback instantâneo e depois no servidor
+          await ApiService.saveProduct({ ...product, status: nextStatus });
+          await refreshData();
+          addToast({ type: 'success', title: 'Status Atualizado', message: `Produto agora está ${nextStatus === ProductStatus.ACTIVE ? 'Ativo' : 'Inativo'}.` });
+      } catch (e: any) {
+          addToast({ type: 'error', title: 'Erro', message: e.message });
+      }
   };
 
   const parseValue = (input: string | undefined, basis: number): { value: number, isPercent: boolean, raw: string } => { if (!input) return { value: 0, isPercent: false, raw: '' }; const clean = input.replace(',', '.').trim(); if (clean.endsWith('%')) { const pct = parseFloat(clean.replace('%', '')); return { value: basis * (pct / 100), isPercent: true, raw: input }; } return { value: parseFloat(clean) || 0, isPercent: false, raw: input }; };
@@ -296,8 +359,8 @@ export const TechPackModule: React.FC = () => {
     if (overheadVal > 0) { finalExtras.push({ id: 'fixed-overhead', name: 'Rateio Operacional (Custo Fixo)', category: 'Geral', value: overheadVal }); }
     const tempTechPack = { ...formTechPack, extraCosts: finalExtras };
     
-    if (!formProduct.colors || formProduct.colors.length === 0) { alert("O Produto precisa ter pelo menos 1 cor cadastrada na aba 'Materiais' antes de salvar."); return; }
-    if (!formTechPack.materials || formTechPack.materials.length === 0) { alert("A Ficha Técnica precisa ter pelo menos 1 material (BOM) cadastrado."); return; }
+    if (!formProduct.colors || formProduct.colors.length === 0) { addToast({type:'warning', title:'Atenção', message: "O Produto precisa ter pelo menos 1 cor cadastrada na aba 'Materiais' antes de salvar."}); return; }
+    if (!formTechPack.materials || formTechPack.materials.length === 0) { addToast({type:'warning', title:'Atenção', message: "A Ficha Técnica precisa ter pelo menos 1 material (BOM) cadastrado."}); return; }
 
     const totals = calculateTotals();
     const finalPrice = formTechPack.suggestedPrice && formTechPack.suggestedPrice > 0 ? formTechPack.suggestedPrice : totals.suggestedPrice;
@@ -357,13 +420,13 @@ export const TechPackModule: React.FC = () => {
         setIsEditing(false);
         setIsPreviewOpen(true); 
 
-        alert(status === 'aprovado' ? 'Ficha Técnica Aprovada com Sucesso!' : 'Rascunho Salvo com Sucesso!');
+        addToast({ type: 'success', title: status === 'aprovado' ? 'Ficha Aprovada' : 'Rascunho Salvo', message: 'As alterações foram registradas.' });
 
     } catch (e: any) {
         // Log de Erro
         SystemLogService.addLog('error', 'Falha ao Salvar Ficha', e.message || 'Erro desconhecido de conexão');
         console.error(e);
-        alert(`Erro ao salvar: ${e.message}. Verifique os Logs em Configurações.`);
+        addToast({ type: 'error', title: 'Erro ao Salvar', message: e.message });
     }
   };
 
@@ -387,16 +450,22 @@ export const TechPackModule: React.FC = () => {
         SystemLogService.addLog('success', 'Produto Criado', `SKU: ${created.sku}`);
     } catch (e: any) {
         SystemLogService.addLog('error', 'Erro Criar Produto', e.message);
-        alert(e.message);
+        addToast({ type: 'error', title: 'Erro', message: e.message });
     }
   };
 
-  // ... (Resto dos handlers: handleImageUpload, handleBOMUpdate, etc. mantidos iguais) ...
+  const handleVariantAdd = (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (!selectedColorToAdd) return;
+      toggleProductColor(selectedColorToAdd);
+      setSelectedColorToAdd('');
+  };
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => { setFormProductImage(reader.result as string); setShowImageMenu(false); }; reader.readAsDataURL(file); } };
   const handleBOMUpdate = (idx: number, field: keyof BOMItem | 'colorCosts', value: any) => { const newMaterials = [...(formTechPack.materials || [])]; if (field === 'colorCosts') { newMaterials[idx].colorCosts = value; } else { (newMaterials[idx] as any)[field] = value; } setFormTechPack({ ...formTechPack, materials: newMaterials }); };
   const handleBOMRemove = (idx: number) => { const newMaterials = [...(formTechPack.materials || [])]; newMaterials.splice(idx, 1); setFormTechPack({ ...formTechPack, materials: newMaterials }); };
   const handleBack = () => { if (activeTab === 'cuts') setActiveTab('bom'); else if (activeTab === 'ops') setActiveTab('cuts'); else if (activeTab === 'measurements') setActiveTab('ops'); else if (activeTab === 'observations') setActiveTab('measurements'); else if (activeTab === 'pricing') setActiveTab('observations'); };
-  const handleNext = () => { if (activeTab === 'bom') { if (!formProduct.colors || formProduct.colors.length === 0) { alert("É obrigatório adicionar pelo menos 1 Cor ao produto antes de avançar."); return; } if (!formTechPack.materials || formTechPack.materials.length === 0) { alert("A lista de materiais (BOM) é obrigatória."); return; } } if (activeTab === 'bom') setActiveTab('cuts'); else if (activeTab === 'cuts') setActiveTab('ops'); else if (activeTab === 'ops') setActiveTab('measurements'); else if (activeTab === 'measurements') setActiveTab('observations'); else if (activeTab === 'observations') setActiveTab('pricing'); else if (activeTab === 'pricing') handleSaveDraft(); };
+  const handleNext = () => { if (activeTab === 'bom') { if (!formProduct.colors || formProduct.colors.length === 0) { addToast({type:'warning', title:'Atenção', message: "É obrigatório adicionar pelo menos 1 Cor."}); return; } if (!formTechPack.materials || formTechPack.materials.length === 0) { addToast({type:'warning', title:'Atenção', message: "A lista de materiais é obrigatória."}); return; } } if (activeTab === 'bom') setActiveTab('cuts'); else if (activeTab === 'cuts') setActiveTab('ops'); else if (activeTab === 'ops') setActiveTab('measurements'); else if (activeTab === 'measurements') setActiveTab('observations'); else if (activeTab === 'observations') setActiveTab('pricing'); else if (activeTab === 'pricing') handleSaveDraft(); };
 
   // ... (Render Functions mantidos iguais) ...
   const renderBOMEditor = () => (
@@ -457,6 +526,7 @@ export const TechPackModule: React.FC = () => {
   };
 
   const renderTechPackPreview = () => {
+      // ... (no logic changes, just styling which is already clean)
       if (!previewData) return null;
       const { product, techPack } = previewData;
       const financials = calculatePreviewFinancials(techPack);
@@ -464,6 +534,7 @@ export const TechPackModule: React.FC = () => {
           <div className="fixed inset-0 z-[100] bg-slate-50 overflow-y-auto font-sans no-print">
               <header className="sticky top-0 z-30 bg-slate-900 border-b border-slate-800 text-white shadow-xl"><div className="max-w-[1920px] mx-auto px-6 py-4 flex justify-between items-center"><div className="flex items-center gap-6"><button onClick={() => setIsPreviewOpen(false)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition-colors"><ArrowLeft size={24}/></button><div><h1 className="text-xl font-bold tracking-wide flex items-center gap-3">{product.name} <span className="text-slate-500 font-mono font-normal text-sm border-l border-slate-700 pl-3">{product.sku}</span></h1><div className="flex gap-3 mt-1 text-xs font-bold uppercase tracking-wider text-slate-400 items-center"><span>{product.collection}</span><span className="text-slate-600">•</span><span>Versão {techPack.version}</span><span className="text-slate-600">•</span><span className={techPack.status === 'aprovado' ? 'text-green-400' : 'text-yellow-400'}>{techPack.status}</span>{techPack.status === 'aprovado' && (<><span className="text-slate-600 mx-2">|</span><span className="flex items-center gap-1 text-blue-400 border border-blue-900 bg-blue-900/30 px-2 py-0.5 rounded cursor-help" title="Este é um registro Mestre Protegido. Alterações aqui impactam todo o ERP."><ShieldCheck size={12}/> Módulo Central Protegido</span></>)}</div></div></div><div className="flex gap-3"><button onClick={() => { setIsPreviewOpen(false); handleStartEdit(techPack, product.imageUrl, product); }} className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all"><Edit2 size={16}/> Editar</button><button onClick={() => window.print()} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-blue-900/50"><Printer size={16}/> Imprimir</button></div></div></header>
               <div className="max-w-[1920px] mx-auto p-6 space-y-6">
+                  {/* ... (rest of preview render remains identical) ... */}
                   <div className="grid grid-cols-12 gap-6 h-[420px]">
                       <div className="col-span-3 bg-white rounded-3xl border border-gray-200 p-6 shadow-sm flex flex-col relative overflow-hidden group"><div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl mb-4 relative overflow-hidden">{product.imageUrl ? (<img src={product.imageUrl} className="w-full h-full object-cover mix-blend-multiply"/>) : (<ImageIcon size={64} className="text-gray-300"/>)}<div className="absolute bottom-3 right-3 bg-white/90 px-3 py-1 rounded-full text-xs font-bold text-gray-600 shadow-sm backdrop-blur-sm">{product.collection}</div></div><div className="flex justify-between items-end"><div><div className="text-xs text-gray-400 font-bold uppercase mb-1">Status</div><div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${techPack.status === 'aprovado' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-yellow-50 text-yellow-700 border-yellow-200'}`}><div className={`w-2 h-2 rounded-full ${techPack.status === 'aprovado' ? 'bg-green-500' : 'bg-yellow-500'}`}></div>{techPack.status.toUpperCase()}</div></div><div className="text-right"><div className="text-xs text-gray-400 font-bold uppercase">Data Criação</div><div className="text-sm font-bold text-gray-700">{new Date(techPack.createdAt).toLocaleDateString()}</div></div></div></div>
                       <div className="col-span-6 bg-slate-900 rounded-3xl p-8 shadow-xl text-white relative overflow-hidden flex flex-col justify-between"><div className="absolute top-0 right-0 w-64 h-64 bg-blue-600 rounded-full blur-[100px] opacity-20 -mr-16 -mt-16 pointer-events-none"></div><div className="relative z-10 flex justify-between items-start"><div><h3 className="text-slate-400 font-bold text-xs uppercase tracking-widest mb-1 flex items-center gap-2"><DollarSign size={14}/> Engenharia de Custo</h3><div className="text-5xl font-bold tracking-tight mt-2">R$ {financials.price.toFixed(2)}</div><p className="text-slate-400 text-sm mt-1">Preço de Venda Definido</p></div><div className="text-right"><div className={`text-3xl font-bold ${financials.marginPercent > 20 ? 'text-green-400' : 'text-yellow-400'}`}>{financials.marginPercent.toFixed(1)}%</div><div className="text-xs font-bold text-slate-500 uppercase mt-1">Margem Líquida</div></div></div><div className="grid grid-cols-3 gap-8 relative z-10 my-6"><div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50"><div className="text-slate-400 text-xs font-bold uppercase mb-1">Custo Direto</div><div className="text-xl font-bold text-white">R$ {financials.directCost.toFixed(2)}</div></div><div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50"><div className="text-slate-400 text-xs font-bold uppercase mb-1">Impostos/Comissões</div><div className="text-xl font-bold text-red-300">R$ {(financials.taxesValue + financials.commValue).toFixed(2)}</div><div className="text-[10px] text-slate-500 mt-1">Tax: {financials.taxesRate}% | Com: {financials.commRate}%</div></div><div className="bg-green-900/20 p-4 rounded-2xl border border-green-500/20"><div className="text-green-400 text-xs font-bold uppercase mb-1">Lucro Real</div><div className="text-xl font-bold text-green-300">R$ {financials.netProfit.toFixed(2)}</div></div></div><div className="relative z-10"><div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-2"><span>Composição do Preço</span></div><div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden flex"><div style={{width: `${(techPack.materialCost / financials.price)*100}%`}} className="h-full bg-blue-500" title="Matéria Prima"></div><div style={{width: `${(techPack.laborCost / financials.price)*100}%`}} className="h-full bg-indigo-500" title="Mão de Obra"></div><div style={{width: `${((financials.taxesValue+financials.commValue) / financials.price)*100}%`}} className="h-full bg-red-500" title="Impostos"></div><div className="h-full bg-green-500 flex-1" title="Lucro"></div></div><div className="flex gap-4 mt-3 text-[10px] font-bold text-slate-500"><div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-blue-500"></div> Matéria Prima</div><div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-indigo-500"></div> Mão de Obra</div><div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-red-500"></div> Impostos</div><div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-green-500"></div> Lucro</div></div></div></div>
@@ -489,28 +560,71 @@ export const TechPackModule: React.FC = () => {
 
   const renderProductList = () => (
     <div>
+        <div className="flex gap-6 border-b border-gray-200 mb-6 no-print">
+            <button 
+                onClick={() => setProductTab('active')}
+                className={`pb-3 px-1 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${productTab === 'active' ? 'border-purple-600 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+                Ativos <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full text-xs">{activeCount}</span>
+            </button>
+            <button 
+                onClick={() => setProductTab('inactive')}
+                className={`pb-3 px-1 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${productTab === 'inactive' ? 'border-purple-600 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+                Inativos <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full text-xs">{inactiveCount}</span>
+            </button>
+        </div>
+
         {selectedProductIds.length > 0 && (<div className="bg-blue-600 text-white p-3 rounded-lg flex justify-between items-center mb-4 shadow-md animate-fade-in no-print sticky top-20 z-30"><div className="flex items-center gap-4"><span className="font-bold ml-2">{selectedProductIds.length} selecionado(s)</span><button onClick={toggleSelectAll} className="text-xs bg-blue-700 hover:bg-blue-800 px-3 py-1 rounded">{selectedProductIds.length === filteredProducts.length ? 'Desmarcar Todos' : 'Selecionar Todos'}</button></div><button onClick={handleRequestBulkDelete} className="bg-red-500 hover:bg-red-600 text-white px-4 py-1.5 rounded font-bold text-sm flex items-center gap-2"><Trash2 size={16}/> Excluir Selecionados</button></div>)}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {filteredProducts.map(p => {
             const techPacks = p.techPacks || [];
-            
-            // PRIORITY CHANGE: Always show latest first, even if it's a draft.
-            // Since API sorts techPacks by version desc, techPacks[0] is the latest.
             const latest = techPacks.length > 0 ? techPacks[0] : undefined;
-            const displayTP = latest; // Simple and correct logic
-
+            const displayTP = latest; 
             const isSelected = selectedProductIds.includes(p.id);
+            const isInactive = p.status === ProductStatus.INACTIVE;
+
             return (
-            <div key={p.id} onClick={() => handleOpenPreview(p, displayTP)} className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-lg transition-all flex items-start gap-4 group relative ${isSelected ? 'border-blue-500 ring-2 ring-blue-100' : 'border-gray-200 hover:border-blue-400'}`}>
+            <div key={p.id} onClick={() => handleOpenPreview(p, displayTP)} className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-lg transition-all flex items-start gap-4 group relative ${isSelected ? 'border-blue-500 ring-2 ring-blue-100' : 'border-gray-200 hover:border-blue-400'} ${isInactive ? 'opacity-70 bg-gray-50' : ''}`}>
                 <button type="button" className="absolute top-2 left-2 z-20 p-2 text-gray-400 hover:text-blue-600" onClick={(e) => toggleSelect(p.id, e)}>{isSelected ? (<CheckSquare className="text-blue-600 fill-blue-50" size={20}/>) : (<Square className="text-gray-300 hover:text-gray-500" size={20}/>)}</button>
-                <button type="button" className="absolute top-2 right-2 z-20 p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors" onClick={(e) => handleRequestDelete(p.id, e)} title="Excluir Ficha Técnica"><Trash2 size={18}/></button>
+                <div className="absolute top-2 right-2 z-20 flex gap-1">
+                    <button 
+                        type="button" 
+                        className={`p-2 rounded-full transition-colors ${isInactive ? 'text-red-400 bg-red-50 hover:bg-red-100' : 'text-green-500 hover:bg-green-50'}`}
+                        onClick={(e) => handleToggleStatus(p, e)}
+                        title={isInactive ? "Ativar Produto" : "Desativar Produto"}
+                    >
+                        <Power size={18} />
+                    </button>
+                    <button type="button" className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors" onClick={(e) => handleRequestDelete(p.id, e)} title="Excluir Produto"><Trash2 size={18}/></button>
+                </div>
+                
                 <div className="relative ml-6"><img src={p.imageUrl} className="w-20 h-20 rounded-lg bg-gray-100 object-cover"/><div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors rounded-lg flex items-center justify-center"><Eye className="text-white opacity-0 group-hover:opacity-100 drop-shadow-md"/></div></div>
-                <div className="flex-1 min-w-0 pt-1"><div className="flex justify-between items-start pr-6"><h3 className="font-bold text-gray-900 truncate group-hover:text-blue-600 transition-colors">{p.name}</h3></div>{displayTP && <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${displayTP.status === 'aprovado' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>{displayTP.status === 'rascunho' ? 'Rascunho' : 'Aprovado'} v{displayTP.version}</span>}<div className="text-sm text-gray-500">{p.sku}</div><div className="text-xs text-gray-400 mt-1">{p.collection}</div>
-                {displayTP && (<div className="mt-3 pt-3 border-t border-gray-100 grid grid-cols-2 gap-2 text-xs"><div><div className="text-gray-400 font-bold uppercase text-[10px]">Custo Ind.</div><div className="font-bold text-gray-700">R$ {displayTP.totalCost.toFixed(2)}</div></div><div className="text-right"><div className="text-gray-400 font-bold uppercase text-[10px]">Preço Venda</div><div className="font-bold text-blue-600">R$ {(displayTP.suggestedPrice || 0).toFixed(2)}</div></div><div className="col-span-2 flex justify-between items-center mt-1"><div className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${displayTP.salesType === 'Hype' ? 'bg-purple-50 text-purple-700 border-purple-200' : displayTP.salesType === 'Vende Tudo' ? 'bg-orange-50 text-orange-700 border-orange-200' : 'bg-gray-50 text-gray-600 border-gray-200'}`}><Flame size={10}/> {displayTP.salesType || 'Normal'}</div><div className={`font-bold ${displayTP.targetMargin > 0 ? 'text-green-600' : 'text-gray-400'}`}>Margem: {displayTP.targetMargin}%</div></div></div>)}
-                {!displayTP && (<div className="mt-2 text-right font-bold text-gray-400 text-sm italic">Sem Engenharia</div>)}</div>
+                <div className="flex-1 min-w-0 pt-1">
+                    <div className="flex justify-between items-start pr-14">
+                        <h3 className="font-bold text-gray-900 truncate group-hover:text-blue-600 transition-colors">{p.name}</h3>
+                    </div>
+                    
+                    <div className="flex gap-2 mt-1">
+                        {isInactive && <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-red-100 text-red-600 border border-red-200">INATIVO</span>}
+                        {displayTP && <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${displayTP.status === 'aprovado' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>{displayTP.status === 'rascunho' ? 'Rascunho' : 'Aprovado'} v{displayTP.version}</span>}
+                    </div>
+
+                    <div className="text-sm text-gray-500 mt-1">{p.sku}</div>
+                    <div className="text-xs text-gray-400">{p.collection}</div>
+                
+                    {displayTP && (<div className="mt-3 pt-3 border-t border-gray-100 grid grid-cols-2 gap-2 text-xs"><div><div className="text-gray-400 font-bold uppercase text-[10px]">Custo Ind.</div><div className="font-bold text-gray-700">R$ {displayTP.totalCost.toFixed(2)}</div></div><div className="text-right"><div className="text-gray-400 font-bold uppercase text-[10px]">Preço Venda</div><div className="font-bold text-blue-600">R$ {(displayTP.suggestedPrice || 0).toFixed(2)}</div></div><div className="col-span-2 flex justify-between items-center mt-1"><div className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${displayTP.salesType === 'Hype' ? 'bg-purple-50 text-purple-700 border-purple-200' : displayTP.salesType === 'Vende Tudo' ? 'bg-orange-50 text-orange-700 border-orange-200' : 'bg-gray-50 text-gray-600 border-gray-200'}`}><Flame size={10}/> {displayTP.salesType || 'Normal'}</div><div className={`font-bold ${displayTP.targetMargin > 0 ? 'text-green-600' : 'text-gray-400'}`}>Margem: {displayTP.targetMargin}%</div></div></div>)}
+                    {!displayTP && (<div className="mt-2 text-right font-bold text-gray-400 text-sm italic">Sem Engenharia</div>)}
+                </div>
             </div>
             )
         })}
+        {filteredProducts.length === 0 && (
+            <div className="col-span-full py-12 text-center text-gray-400 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                <Archive size={48} className="mx-auto mb-4 opacity-20"/>
+                <p>Nenhum produto {productTab === 'active' ? 'ativo' : 'inativo'} encontrado.</p>
+            </div>
+        )}
         </div>
     </div>
   );

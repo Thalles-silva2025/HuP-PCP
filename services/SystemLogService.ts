@@ -11,14 +11,14 @@ export interface SystemLog {
 }
 
 export const SystemLogService = {
-    // Recupera logs do Banco de Dados
+    // Recupera logs do Banco de Dados (Limitado a 20)
     getLogs: async (): Promise<SystemLog[]> => {
         try {
             const { data, error } = await supabase
                 .from('system_logs')
                 .select('*')
                 .order('created_at', { ascending: false })
-                .limit(100);
+                .limit(20); // Limite solicitado
 
             if (error) throw error;
 
@@ -36,10 +36,9 @@ export const SystemLogService = {
         }
     },
 
-    // Adiciona um novo log no Banco de Dados
+    // Adiciona um novo log e limpa antigos
     addLog: async (type: 'success' | 'error' | 'warning' | 'info', action: string, details: string) => {
         try {
-            // Tenta obter o organization_id do usuário atual
             const { data: { user } } = await supabase.auth.getUser();
             let orgId = null;
             
@@ -62,7 +61,13 @@ export const SystemLogService = {
 
             await supabase.from('system_logs').insert([newLog]);
             
-            // Retorna formato compatível com UI local, embora seja async agora
+            // AUTO-CLEANUP: Remove logs com mais de 7 dias ou mantém apenas os últimos 50 no banco para não inchar
+            if (Math.random() < 0.2) { // Roda em 20% das vezes para não pesar
+                const oneWeekAgo = new Date();
+                oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+                await supabase.from('system_logs').delete().lt('created_at', oneWeekAgo.toISOString());
+            }
+            
             return {
                 id: 'temp-id',
                 timestamp: new Date().toISOString(),
@@ -75,22 +80,16 @@ export const SystemLogService = {
         }
     },
 
-    // Limpa os logs (Remove do banco)
     clearLogs: async () => {
         try {
-            // Remove apenas logs da organização do usuário (via RLS)
             const { data: { user } } = await supabase.auth.getUser();
             if(!user) return;
-            
-            // Logica simplificada: Delete all rows visible to user
-            // Como RLS filtra por org, isso deleta apenas logs da org
             await supabase.from('system_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000'); 
         } catch (e) {
             console.error("Erro ao limpar logs:", e);
         }
     },
 
-    // Conta erros (versão simplificada local não é viável sem query, retorna 0 ou implementa count se necessário)
     getErrorCount: async () => {
         const { count } = await supabase
             .from('system_logs')

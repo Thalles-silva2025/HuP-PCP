@@ -1,22 +1,15 @@
 
+// ... existing imports ...
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
 import { ApiService } from '../services/api';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw, AlertTriangle, Trash2, Clock, Ruler, ArrowRight } from 'lucide-react'; // Added ArrowRight
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useDialog } from '../contexts/DialogContext'; // IMPORT DIALOG
+import { useToast } from '../contexts/ToastContext'; // IMPORT TOAST
 
-// Helper for Color
-const getColorStyle = (colorName: string) => {
-    const map: any = {
-        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
-        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
-        'Rosa': '#ffc0cb', 'Roxo': '#800080'
-    };
-    return map[colorName] || '#cccccc';
-};
-
-// HELPER: Size Sorting
+// ... existing helper functions (sortSizes, StatusBadge, SizeColorMatrix) ...
 const sortSizes = (a: string, b: string) => {
     const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'U', 'UN'];
     const aUpper = a.toUpperCase().trim();
@@ -56,7 +49,8 @@ const StatusBadge = ({ status }: { status: OrderStatus }) => {
   );
 };
 
-const SizeColorMatrix = ({ items, sizes }: { items: any[], sizes: string[] }) => {
+// Updated Component to accept colorsMap
+const SizeColorMatrix = ({ items, sizes, colorsMap }: { items: any[], sizes: string[], colorsMap: Record<string, string> }) => {
   const matrix: Record<string, Record<string, number>> = {};
   const colors = Array.from(new Set(items.map(i => i.color)));
   
@@ -105,7 +99,7 @@ const SizeColorMatrix = ({ items, sizes }: { items: any[], sizes: string[] }) =>
           {colors.map(color => (
             <tr key={color} className="hover:bg-gray-50">
               <td className="p-2 text-left font-medium text-gray-800 flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full border" style={{backgroundColor: getColorStyle(color)}}></div>
+                  <div className="w-3 h-3 rounded-full border shadow-sm" style={{backgroundColor: colorsMap[color] || '#ccc'}}></div>
                   {color}
               </td>
               {sizes.map(s => (
@@ -133,6 +127,8 @@ export const ProductionOrderList: React.FC = () => {
   const location = useLocation();
   const queryClient = useQueryClient();
   const highlightOpId = (location.state as any)?.highlightOpId;
+  const dialog = useDialog(); // DIALOG
+  const { addToast } = useToast(); // TOAST
 
   // --- REACT QUERY ---
   const { data: rawOps = [], isLoading: loadingOps, refetch: refetchOps } = useQuery({
@@ -146,6 +142,32 @@ export const ProductionOrderList: React.FC = () => {
     queryFn: ApiService.getProducts,
     staleTime: 1000 * 60 * 5
   });
+
+  const { data: dbColors = [] } = useQuery({
+    queryKey: ['colors'],
+    queryFn: ApiService.getColors,
+    staleTime: 1000 * 60 * 10
+  });
+  
+  const { data: materials = [] } = useQuery({
+    queryKey: ['materials'],
+    queryFn: ApiService.getMaterials,
+    staleTime: 1000 * 60 * 10
+  });
+
+  // Color Map Logic
+  const colorsMap = useMemo(() => {
+      const map: Record<string, string> = {
+        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
+        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
+        'Rosa': '#ffc0cb', 'Roxo': '#800080', 'Nude': '#e8dcd6', 'Off-White': '#f8f9fa'
+      };
+      // Override/Extend with DB colors
+      dbColors.forEach(c => {
+          if (c.name) map[c.name] = c.hex;
+      });
+      return map;
+  }, [dbColors]);
 
   // Derived sorted OPs
   const ops = useMemo(() => {
@@ -318,7 +340,7 @@ export const ProductionOrderList: React.FC = () => {
       return counts;
   }, [ops]);
 
-  // ... (Actions like EditBatch, SaveRevision, SavePacking, RiskPlanning - Keep Existing) ...
+  // Actions
   const handleEditBatch = (e: React.MouseEvent, groupOps: ProductionOrder[]) => {
       e.stopPropagation();
       const canEdit = groupOps.every(o => o.status === OrderStatus.DRAFT || o.status === OrderStatus.PLANNED);
@@ -327,6 +349,26 @@ export const ProductionOrderList: React.FC = () => {
           return;
       }
       navigate('/ops/new', { state: { editBatch: groupOps } });
+  };
+
+  const handleDeleteOp = async (op: ProductionOrder) => {
+      const confirmed = await dialog.confirm({
+          title: 'Excluir Ordem de Produção?',
+          message: `Você tem certeza que deseja excluir permanentemente a OP ${op.lotNumber}? Esta ação não pode ser desfeita.`,
+          type: 'danger',
+          confirmText: 'Excluir',
+          cancelText: 'Cancelar'
+      });
+
+      if (!confirmed) return;
+
+      try {
+          await ApiService.deleteProductionOrder(op.id);
+          addToast({ type: 'success', title: 'Sucesso', message: 'Ordem de Produção excluída.' });
+          refetchOps();
+      } catch (e: any) {
+          addToast({ type: 'error', title: 'Erro', message: e.message });
+      }
   };
 
   const saveRevision = async () => {
@@ -366,7 +408,58 @@ export const ProductionOrderList: React.FC = () => {
       alert('Ordem de Produção Finalizada e Estoque Atualizado Automaticamente!');
   };
 
+  // Helper for rendering Fabric Planning in Details
+  const renderFabricAndMarkerInfo = (op: ProductionOrder) => {
+      const hasFabricInfo = op.fabricPurchasedTotal || (op.fabricPurchasedBreakdown && Object.keys(op.fabricPurchasedBreakdown).length > 0);
+      const hasMarkerInfo = op.plannedMarkerWidth && op.plannedMarkerLength;
+      
+      if (!hasFabricInfo && !hasMarkerInfo) return null;
+
+      const fabricName = materials.find(m => m.id === op.selectedFabricId)?.name || 'Tecido não selecionado';
+
+      return (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+              <h4 className="font-bold text-blue-800 text-sm mb-3 flex items-center gap-2">
+                  <Ruler size={14}/> Insumos & Encaixe (Planejado)
+              </h4>
+              <div className="grid grid-cols-2 gap-6 text-sm">
+                  {/* Marker Info */}
+                  {hasMarkerInfo && (
+                      <div>
+                          <div className="text-xs font-bold text-blue-600 mb-1 uppercase">Dimensões do Risco (CAD)</div>
+                          <div className="flex gap-2 mb-2">
+                              <span className="bg-white border px-2 py-1 rounded shadow-sm">L: {op.plannedMarkerWidth}m</span>
+                              <span className="bg-white border px-2 py-1 rounded shadow-sm">C: {op.plannedMarkerLength}m</span>
+                          </div>
+                      </div>
+                  )}
+                  
+                  {/* Fabric Info */}
+                  {hasFabricInfo && (
+                      <div>
+                          <div className="text-xs font-bold text-blue-600 mb-1 uppercase">Compra de Tecido</div>
+                          <div className="font-bold text-gray-800 mb-1">{fabricName}</div>
+                          <div className="mb-2">Total: <span className="font-bold">{op.fabricPurchasedTotal}</span></div>
+                          
+                          {op.fabricPurchasedBreakdown && Object.keys(op.fabricPurchasedBreakdown).length > 0 && (
+                              <div className="flex gap-2 flex-wrap mt-1">
+                                  {Object.entries(op.fabricPurchasedBreakdown).map(([color, qty]) => (
+                                      <span key={color} className="bg-white border px-2 py-0.5 rounded text-xs flex items-center gap-1">
+                                          <div className="w-2 h-2 rounded-full border" style={{backgroundColor: colorsMap[color] || '#ccc'}}></div>
+                                          {color}: <b>{qty}</b>
+                                      </span>
+                                  ))}
+                              </div>
+                          )}
+                      </div>
+                  )}
+              </div>
+          </div>
+      );
+  };
+
   const renderRiskPlanning = (op: ProductionOrder) => {
+      // ... existing code ...
       if (!op.cuttingDetails) return <p className="text-gray-400 text-sm">Sem planejamento de corte.</p>;
       
       const { plannedMatrix, plannedLayers } = op.cuttingDetails;
@@ -391,7 +484,7 @@ export const ProductionOrderList: React.FC = () => {
                       <div className="flex gap-2 flex-wrap">
                           {plannedLayers.filter(l => l.layers > 0).map(l => (
                               <span key={l.color} className="bg-white border px-2 py-1 rounded shadow-sm flex items-center gap-1">
-                                  <div className="w-2 h-2 rounded-full" style={{backgroundColor: getColorStyle(l.color)}}></div>
+                                  <div className="w-2 h-2 rounded-full border border-gray-200" style={{backgroundColor: colorsMap[l.color] || '#ccc'}}></div>
                                   {l.color}: <b>{l.layers}</b>
                               </span>
                           ))}
@@ -400,6 +493,32 @@ export const ProductionOrderList: React.FC = () => {
               </div>
           </div>
       );
+  };
+
+  const handleNavigateToStage = (op: ProductionOrder) => {
+      switch(op.status) {
+          case OrderStatus.DRAFT: 
+              navigate('/ops/new', { state: { editBatch: [op] } }); 
+              break;
+          case OrderStatus.PLANNED:
+          case OrderStatus.CUTTING:
+              navigate('/cutting');
+              break;
+          case OrderStatus.SEWING:
+              navigate('/subcontractors');
+              break;
+          case OrderStatus.QUALITY_CONTROL:
+              navigate('/revision');
+              break;
+          case OrderStatus.PACKING:
+              navigate('/packing');
+              break;
+          case OrderStatus.COMPLETED:
+              navigate('/inventory');
+              break;
+          default:
+              break;
+      }
   };
 
   return (
@@ -594,6 +713,8 @@ export const ProductionOrderList: React.FC = () => {
                                     <tbody className="divide-y divide-gray-200 border-l-2 border-blue-200">
                                         {groupOps.map(op => {
                                             const prod = products.find(p => p.id === op.productId);
+                                            const isDeletable = op.status === OrderStatus.PLANNED || op.status === OrderStatus.DRAFT;
+                                            
                                             return (
                                                 <tr key={op.id} className="hover:bg-white transition-colors">
                                                     <td className="py-3 pl-4 font-mono font-bold text-gray-700">{op.lotNumber}</td>
@@ -604,13 +725,22 @@ export const ProductionOrderList: React.FC = () => {
                                                     <td className="py-3 font-medium">{op.quantityTotal}</td>
                                                     <td className="py-3 text-gray-600 text-xs">{op.subcontractor || '-'}</td>
                                                     <td className="py-3"><StatusBadge status={op.status}/></td>
-                                                    <td className="py-3 text-right">
+                                                    <td className="py-3 text-right flex justify-end gap-2">
                                                         <button 
                                                             onClick={() => openDetails(op)}
                                                             className="bg-white border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-100 text-xs font-bold shadow-sm inline-flex items-center gap-1"
                                                         >
                                                             <Eye size={12}/> Gerenciar
                                                         </button>
+                                                        {isDeletable && (
+                                                            <button 
+                                                                onClick={() => handleDeleteOp(op)}
+                                                                className="bg-white border border-red-200 text-red-500 px-2 py-1 rounded hover:bg-red-50 hover:text-red-700 text-xs shadow-sm"
+                                                                title="Excluir OP"
+                                                            >
+                                                                <Trash2 size={12}/>
+                                                            </button>
+                                                        )}
                                                     </td>
                                                 </tr>
                                             )
@@ -655,6 +785,12 @@ export const ProductionOrderList: React.FC = () => {
                     </div>
                  </div>
                  <div className="flex gap-2">
+                     <button 
+                        onClick={() => handleNavigateToStage(selectedOp)}
+                        className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2 text-sm transition-colors"
+                     >
+                        <ArrowRight size={16}/> Gerenciar na Etapa Atual
+                     </button>
                      <button onClick={() => window.print()} className="p-2 hover:bg-slate-700 rounded text-slate-300"><Printer/></button>
                      <button onClick={() => setSelectedOp(null)} className="p-2 hover:bg-red-900/50 rounded text-red-400"><X/></button>
                  </div>
@@ -717,6 +853,51 @@ export const ProductionOrderList: React.FC = () => {
                             </div>
                         </div>
 
+                        {/* NEW DATE FORECAST SECTION */}
+                        <div className="bg-white p-4 rounded-lg border shadow-sm">
+                            <h4 className="font-bold text-gray-800 text-sm mb-3 flex items-center gap-2">
+                                <Calendar size={16} className="text-blue-600"/> Cronograma & Previsões
+                            </h4>
+                            <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm">
+                                <div className="p-2 bg-blue-50 rounded border border-blue-100">
+                                    <div className="text-[10px] text-blue-600 font-bold uppercase">Data Início</div>
+                                    <div className="font-bold text-gray-800">{new Date(selectedOp.startDate).toLocaleDateString()}</div>
+                                </div>
+                                <div className="p-2 bg-green-50 rounded border border-green-100">
+                                    <div className="text-[10px] text-green-600 font-bold uppercase">Data Entrega</div>
+                                    <div className={`font-bold ${new Date(selectedOp.dueDate) < new Date() ? 'text-red-600' : 'text-green-600'}`}>
+                                        {new Date(selectedOp.dueDate).toLocaleDateString()}
+                                    </div>
+                                </div>
+                                
+                                {/* Phase Dates */}
+                                {selectedOp.phaseDates ? (
+                                    <>
+                                        <div className="border-l pl-4 border-gray-200">
+                                            <div className="text-[10px] text-gray-400 uppercase font-bold">Corte (Lim)</div>
+                                            <div className="text-gray-600 font-medium">{selectedOp.phaseDates.cuttingEnd ? new Date(selectedOp.phaseDates.cuttingEnd).toLocaleDateString() : '-'}</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-[10px] text-gray-400 uppercase font-bold">Costura (Lim)</div>
+                                            <div className="text-gray-600 font-medium">{selectedOp.phaseDates.sewingEnd ? new Date(selectedOp.phaseDates.sewingEnd).toLocaleDateString() : '-'}</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-[10px] text-gray-400 uppercase font-bold">Revisão (Lim)</div>
+                                            <div className="text-gray-600 font-medium">{selectedOp.phaseDates.revisionEnd ? new Date(selectedOp.phaseDates.revisionEnd).toLocaleDateString() : '-'}</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-[10px] text-gray-400 uppercase font-bold">Emb. (Lim)</div>
+                                            <div className="text-gray-600 font-medium">{selectedOp.phaseDates.packingEnd ? new Date(selectedOp.phaseDates.packingEnd).toLocaleDateString() : '-'}</div>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="col-span-4 flex items-center text-gray-400 italic text-xs">
+                                        Cronograma detalhado não definido.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
                         {/* Detail Matrix - NOW HANDLES MULTIPLE PRODUCTS SEPARATELY */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border">
                             <div className="flex justify-between mb-4 items-center">
@@ -742,18 +923,19 @@ export const ProductionOrderList: React.FC = () => {
                                                     </span>
                                                 </div>
                                                 {/* Render Risk & Matrix for this child */}
+                                                {renderFabricAndMarkerInfo(childOp)}
                                                 {renderRiskPlanning(childOp)}
                                                 
                                                 {/* Comparison Logic: If Original Items exist, show them */}
                                                 {childOp.originalItems && (
                                                     <div className="mb-4 opacity-70">
                                                         <h5 className="text-xs font-bold text-gray-500 mb-1 flex items-center gap-1"><AlertTriangle size={12}/> Planejamento Original</h5>
-                                                        <SizeColorMatrix items={childOp.originalItems} sizes={getActiveSizes(childOp)} />
+                                                        <SizeColorMatrix items={childOp.originalItems} sizes={getActiveSizes(childOp)} colorsMap={colorsMap}/>
                                                     </div>
                                                 )}
                                                 
                                                 <h5 className="text-xs font-bold text-blue-600 mb-1">Grade Real (Atualizada)</h5>
-                                                <SizeColorMatrix items={childOp.items} sizes={getActiveSizes(childOp)} />
+                                                <SizeColorMatrix items={childOp.items} sizes={getActiveSizes(childOp)} colorsMap={colorsMap}/>
                                             </div>
                                         );
                                     })}
@@ -761,34 +943,37 @@ export const ProductionOrderList: React.FC = () => {
                             ) : (
                                 // SINGLE VIEW: Render once
                                 <>
+                                    {renderFabricAndMarkerInfo(selectedOp)}
                                     {renderRiskPlanning(selectedOp)}
                                     
                                     {/* Comparison Logic: If Original Items exist, show them */}
                                     {selectedOp.originalItems && (
                                         <div className="mb-6 opacity-70 bg-gray-50 p-3 rounded-lg border border-gray-200">
                                             <h5 className="text-xs font-bold text-gray-500 mb-2 flex items-center gap-1"><AlertTriangle size={12}/> Grade Original (Planejada)</h5>
-                                            <SizeColorMatrix items={selectedOp.originalItems} sizes={getActiveSizes(selectedOp)} />
+                                            <SizeColorMatrix items={selectedOp.originalItems} sizes={getActiveSizes(selectedOp)} colorsMap={colorsMap}/>
                                         </div>
                                     )}
 
                                     <h5 className="text-xs font-bold text-blue-600 mb-2 mt-4">Grade Realizada (Atualizada pelo Corte)</h5>
-                                    <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} />
+                                    <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} colorsMap={colorsMap}/>
                                 </>
                             )}
                         </div>
 
                         {/* Timeline - Enhanced with User & Precise Time */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border">
-                            <h3 className="font-bold text-gray-800 mb-4">Histórico de Rastreabilidade</h3>
+                            <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><Clock size={18}/> Histórico de Rastreabilidade</h3>
                             <div className="space-y-6 relative pl-4 border-l-2 border-gray-200 ml-4">
-                                {selectedOp.events?.map((ev, i) => (
-                                    <div key={i} className="relative pl-6">
-                                        <div className="absolute -left-[31px] top-0 w-6 h-6 rounded-full bg-white border-4 border-blue-500"></div>
+                                {[...(selectedOp.events || [])]
+                                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                                    .map((ev, i) => (
+                                    <div key={i} className="relative pl-6 pb-2">
+                                        <div className="absolute -left-[31px] top-0 w-6 h-6 rounded-full bg-white border-4 border-blue-500 shadow-sm"></div>
                                         
-                                        <div className="flex justify-between items-start">
-                                            <div className="font-bold text-gray-800">{ev.action}</div>
-                                            <div className="text-xs text-gray-400 flex items-center gap-1 bg-gray-50 px-2 py-1 rounded border">
-                                                <Calendar size={12}/> {new Date(ev.date).toLocaleString()}
+                                        <div className="flex justify-between items-start mb-1">
+                                            <div className="font-bold text-gray-800 text-sm">{ev.action}</div>
+                                            <div className="text-[10px] text-gray-400 font-bold bg-gray-50 px-2 py-0.5 rounded border border-gray-100 flex items-center gap-1">
+                                                <Clock size={10}/> {new Date(ev.date).toLocaleString()}
                                             </div>
                                         </div>
                                         
@@ -797,14 +982,14 @@ export const ProductionOrderList: React.FC = () => {
                                         </div>
                                         
                                         <div className="flex items-center gap-2 text-xs">
-                                            <span className="text-gray-400 font-medium">Responsável:</span>
-                                            <span className="flex items-center gap-1 font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">
+                                            <span className="text-gray-400 font-medium">Autorizado por:</span>
+                                            <span className="flex items-center gap-1 font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100 shadow-sm">
                                                 <User size={10}/> {ev.user || 'Sistema'}
                                             </span>
                                         </div>
                                     </div>
                                 ))}
-                                {selectedOp.events?.length === 0 && (
+                                {(!selectedOp.events || selectedOp.events.length === 0) && (
                                     <p className="text-gray-400 italic text-sm">Nenhum evento registrado.</p>
                                 )}
                             </div>

@@ -2,9 +2,13 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, ProductionOrderItem, Product } from '../types';
 import { ApiService } from '../services/api';
-import { PackageCheck, CheckCircle, Printer, Box, ArrowRight, X, MapPin, User, AlertTriangle, MoreVertical, RotateCcw, Package, Search, Filter, Grid3X3, ArrowDown, Save, CheckCircle2 } from 'lucide-react';
+import { supabase } from '../services/supabase'; // Access for Payments & Stock
+import { useAuth } from '../contexts/AuthContext'; // Access for Org ID
+import { PackageCheck, CheckCircle, Printer, Box, ArrowRight, X, MapPin, User, MoreVertical, RotateCcw, Package, Search, Grid3X3, ArrowDown, CheckCircle2, Wallet, Loader2, AlertTriangle, Save } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
-import { useToast } from '../contexts/ToastContext'; // Import Toast
+import { useToast } from '../contexts/ToastContext';
+import { useDialog } from '../contexts/DialogContext';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 interface DateRange {
     label: string;
@@ -45,14 +49,40 @@ const sortSizes = (a: string, b: string) => {
 
 export const PackingModule: React.FC = () => {
   const { addToast } = useToast();
-  const [ops, setOps] = useState<ProductionOrder[]>([]);
-  const [completedOps, setCompletedOps] = useState<ProductionOrder[]>([]);
-  const [products, setProducts] = useState<Product[]>([]); // Added products state
+  const dialog = useDialog();
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  // --- 1. CACHE INTELIGENTE (REACT QUERY) ---
+  const { data: allOps = [], isLoading: loadingOps } = useQuery({
+      queryKey: ['productionOrders'],
+      queryFn: ApiService.getProductionOrders,
+      staleTime: 1000 * 60 * 2
+  });
+
+  const { data: products = [] } = useQuery({
+      queryKey: ['products'],
+      queryFn: ApiService.getProducts,
+      staleTime: 1000 * 60 * 5
+  });
+
+  const { data: partners = [] } = useQuery({
+      queryKey: ['partners'],
+      queryFn: ApiService.getPartners,
+      staleTime: 1000 * 60 * 10
+  });
+
+  // Local State
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
   const [form, setForm] = useState<any>({});
   const [errors, setErrors] = useState<Record<string, boolean>>({});
   const [activeMenuOpId, setActiveMenuOpId] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   
+  // Partner Selection State
+  const [packingPartner, setPackingPartner] = useState('');
+  const [isInternalPacking, setIsInternalPacking] = useState(true);
+
   // Matrix State for Detailed Packing
   const [packedMatrix, setPackedMatrix] = useState<Record<string, Record<string, number>>>({});
 
@@ -69,26 +99,16 @@ export const PackingModule: React.FC = () => {
 
   const warehouses = ['Depósito Central', 'Loja 01', 'Loja 02', 'Expedição'];
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  // Derived Data
+  const ops = useMemo(() => {
+      return allOps
+        .filter(op => op.status === OrderStatus.PACKING)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [allOps]);
 
-  const loadData = async () => {
-    try {
-        const [allOps, allProds] = await Promise.all([
-            ApiService.getProductionOrders(),
-            ApiService.getProducts()
-        ]);
-        // Sort recent first (createdAt descending)
-        allOps.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-        setOps(allOps.filter(op => op.status === OrderStatus.PACKING));
-        setCompletedOps(allOps.filter(op => op.status === OrderStatus.COMPLETED && op.packingDetails?.isFinalized));
-        setProducts(allProds);
-    } catch (err: any) {
-        addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados.' });
-    }
-  };
+  const completedOps = useMemo(() => {
+      return allOps.filter(op => op.status === OrderStatus.COMPLETED && op.packingDetails?.isFinalized);
+  }, [allOps]);
 
   const getProductDisplayName = (productId: string) => {
       const prod = products.find(p => p.id === productId);
@@ -119,8 +139,16 @@ export const PackingModule: React.FC = () => {
 
   // --- MATRIX LOGIC & CACHE ---
 
+  const getQty = (list: ProductionOrderItem[], c: string, s: string) => {
+      return list.find(i => i.color === c && i.size === s)?.quantity || 0;
+  };
+
   useEffect(() => {
       if (selectedOp) {
+          // Initialize Partner Logic
+          setIsInternalPacking(true);
+          setPackingPartner('');
+
           // Initialize or Load Cache
           const cacheKey = `packing_cache_${selectedOp.id}`;
           const cached = localStorage.getItem(cacheKey);
@@ -128,23 +156,27 @@ export const PackingModule: React.FC = () => {
           if (cached) {
               setPackedMatrix(JSON.parse(cached));
           } else {
-              // Initialize with Zeros based on Revision Data or Items
+              // CALCULO DO DELTA (O QUE FALTA EMBALAR)
+              // 1. Total Aprovado até agora (Acumulado da Revisão)
+              const approvedItems = (selectedOp.revisionDetails?.itemsApproved && selectedOp.revisionDetails.itemsApproved.length > 0)
+                ? selectedOp.revisionDetails.itemsApproved 
+                : selectedOp.items; // Fallback se revisão não detalhada
+
+              // 2. Total Já Embalado (Acumulado de sessões anteriores)
+              const packedItems = selectedOp.packingDetails?.itemsPacked || [];
+
               const initialMatrix: Record<string, Record<string, number>> = {};
               
-              // Determine source items: Detailed Revision > Revision Total (Plan) > Cut Plan
-              const sourceItems: ProductionOrderItem[] = (selectedOp.revisionDetails?.itemsApproved && selectedOp.revisionDetails.itemsApproved.length > 0)
-                ? selectedOp.revisionDetails.itemsApproved 
-                : selectedOp.items;
-
-              // SORT SIZES HERE
-              const sizes = Array.from(new Set(sourceItems.map((i: ProductionOrderItem) => i.size))).sort(sortSizes);
-              const colors = Array.from(new Set(sourceItems.map((i: ProductionOrderItem) => i.color)));
+              // Define cores e tamanhos baseados no aprovado
+              const sizes = Array.from(new Set(approvedItems.map((i: ProductionOrderItem) => i.size))).sort(sortSizes);
+              const colors = Array.from(new Set(approvedItems.map((i: ProductionOrderItem) => i.color)));
               
               colors.forEach((c) => {
                   const colorKey = c as string;
                   initialMatrix[colorKey] = {};
                   sizes.forEach((s) => {
                       const sizeKey = s as string;
+                      // Inicia zerado para input do usuário
                       initialMatrix[colorKey][sizeKey] = 0;
                   });
               });
@@ -153,19 +185,29 @@ export const PackingModule: React.FC = () => {
       }
   }, [selectedOp]);
 
-  const updateMatrix = (color: string, size: string, value: number) => {
-      if (!selectedOp) return;
-
-      // VALIDATION: Cannot exceed Approved qty
-      const sourceItems = selectedOp.revisionDetails?.itemsApproved?.length 
+  // Helper para obter o máximo permitido (Delta)
+  const getMaxPackableQty = (color: string, size: string) => {
+      if (!selectedOp) return 0;
+      
+      const approvedItems = (selectedOp.revisionDetails?.itemsApproved && selectedOp.revisionDetails.itemsApproved.length > 0)
         ? selectedOp.revisionDetails.itemsApproved 
         : selectedOp.items;
 
-      const targetItem = sourceItems.find(i => i.color === color && i.size === size);
-      const maxQty = targetItem ? targetItem.quantity : 0;
+      const packedItems = selectedOp.packingDetails?.itemsPacked || [];
+
+      const totalApproved = getQty(approvedItems, color, size);
+      const alreadyPacked = getQty(packedItems, color, size);
+
+      return Math.max(0, totalApproved - alreadyPacked);
+  };
+
+  const updateMatrix = (color: string, size: string, value: number) => {
+      if (!selectedOp) return;
+
+      const maxQty = getMaxPackableQty(color, size);
 
       if (value > maxQty) {
-          addToast({ type: 'warning', title: 'Excedente', message: `Quantidade (${value}) maior que aprovado (${maxQty}).` });
+          addToast({ type: 'warning', title: 'Excedente', message: `Quantidade (${value}) maior que o pendente (${maxQty}).` });
           return;
       }
 
@@ -207,10 +249,12 @@ export const PackingModule: React.FC = () => {
 
   const handleFinalize = async () => {
       if (!selectedOp) return;
+      if (isSaving) return;
       
       const newErrors: Record<string, boolean> = {};
       let hasError = false;
 
+      // VALIDATION: Warehouse & Packer
       if (!form.warehouse) { 
           newErrors.warehouse = true; hasError = true; 
           addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Selecione o depósito de destino.' });
@@ -220,55 +264,157 @@ export const PackingModule: React.FC = () => {
           addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Informe o responsável pela embalagem.' });
       }
 
+      // VALIDATION: Partner (New)
+      if (!isInternalPacking && !packingPartner) {
+          addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Selecione o parceiro externo ou marque como Interno.' });
+          hasError = true;
+      }
+
       setErrors(newErrors);
       if (hasError) return;
 
-      // Convert Matrix to Items Array
-      const itemsPacked: ProductionOrderItem[] = [];
+      // 1. Convert Current Session Matrix to Items Array
+      const sessionItems: ProductionOrderItem[] = [];
       Object.entries(packedMatrix).forEach(([color, sizes]) => {
           Object.entries(sizes).forEach(([size, qty]) => {
-              if (qty > 0) itemsPacked.push({ color, size, quantity: qty });
+              if (qty > 0) sessionItems.push({ color, size, quantity: qty });
           });
       });
 
-      const totalPacked = itemsPacked.reduce((a,b)=>a+b.quantity, 0);
+      const sessionTotal = sessionItems.reduce((a,b)=>a+b.quantity, 0);
       
-      if (totalPacked === 0) {
-          if (!confirm("Confirmar finalização com 0 peças embaladas?")) return;
+      if (sessionTotal === 0) {
+          const confirmEmpty = await dialog.confirm({
+              title: 'Embalagem Vazia?',
+              message: 'Nenhuma peça foi apontada. Deseja finalizar com 0 peças?',
+              type: 'warning'
+          });
+          if (!confirmEmpty) return;
       }
 
-      const updatedOp = {
-          ...selectedOp,
-          status: OrderStatus.COMPLETED,
-          packingDetails: {
-              ...form,
-              totalPackedQty: totalPacked,
-              itemsPacked: itemsPacked, // Detail Saved
-              isFinalized: true,
-              packedDate: new Date().toISOString()
-          }
-      };
+      setIsSaving(true);
 
       try {
+          // Get Profile for Organization ID (Needed for Stock and Payment)
+          const { data: profile } = await supabase.from('user_profiles').select('organization_id').eq('id', user?.id).single();
+          const orgId = profile?.organization_id;
+
+          // 2. GENERATE PAYMENT (IF EXTERNAL PARTNER)
+          if (!isInternalPacking && packingPartner && orgId) {
+              const partner = partners.find(p => p.name === packingPartner);
+              if (partner && partner.defaultRate && partner.defaultRate > 0) {
+                  const paymentValue = sessionTotal * partner.defaultRate;
+                  
+                  await supabase.from('payments').insert({
+                      organization_id: orgId,
+                      op_id: selectedOp.id,
+                      partner_name: partner.name,
+                      partner_type: 'Embalagem',
+                      stage: 'Embalagem',
+                      total_amount: paymentValue,
+                      amount_paid: 0,
+                      quantity_delivered: sessionTotal,
+                      rate_per_piece: partner.defaultRate,
+                      status: 'Pendente',
+                      due_date: new Date(Date.now() + 86400000).toISOString() // +1 Day
+                  });
+                  addToast({ type: 'success', title: 'Financeiro', message: `Pagamento gerado para ${partner.name}.` });
+              }
+          }
+
+          // 3. INSERT INTO STOCK (FINISHED GOODS) - CORREÇÃO DE DADOS 2
+          // ONLY INSERT THE NEWLY PACKED ITEMS
+          if (orgId && sessionItems.length > 0) {
+              const stockPayloads = sessionItems.map(item => ({
+                  organization_id: orgId,
+                  product_id: selectedOp.productId,
+                  op_id: selectedOp.id,
+                  warehouse: form.warehouse,
+                  quantity: item.quantity,
+                  color: item.color,
+                  size: item.size,
+                  cost: selectedOp.costSnapshot || 0,
+                  status: 'Disponível',
+                  created_at: new Date().toISOString()
+                  // op_lot_number is usually derived, sticking to core fields
+              }));
+
+              const { error: stockError } = await supabase.from('finished_goods').insert(stockPayloads);
+              
+              if (stockError) {
+                  console.error("Stock Insertion Error:", stockError);
+                  throw new Error("Erro ao inserir no estoque: " + stockError.message);
+              }
+          }
+
+          // 4. UPDATE OP STATUS & CUMULATIVE TOTALS
+          // Merge sessionItems with previously packed items to keep history correct
+          const prevPacked = selectedOp.packingDetails?.itemsPacked || [];
+          
+          // Helper to merge arrays of ProductionOrderItem
+          const mergeItems = (prev: ProductionOrderItem[], curr: ProductionOrderItem[]) => {
+              const map: Record<string, number> = {};
+              [...prev, ...curr].forEach(i => {
+                  const key = `${i.color}###${i.size}`;
+                  map[key] = (map[key] || 0) + i.quantity;
+              });
+              return Object.entries(map).map(([key, qty]) => {
+                  const [color, size] = key.split('###');
+                  return { color, size, quantity: qty };
+              });
+          };
+
+          const finalPackedItems = mergeItems(prevPacked, sessionItems);
+          const finalTotalPacked = finalPackedItems.reduce((a,b)=>a+b.quantity, 0);
+
+          const updatedOp = {
+              ...selectedOp,
+              status: OrderStatus.COMPLETED,
+              packingDetails: {
+                  ...form,
+                  totalPackedQty: finalTotalPacked, // Cumulative Total
+                  itemsPacked: finalPackedItems, // Cumulative Detail Saved
+                  isFinalized: true,
+                  packedDate: new Date().toISOString(),
+                  executor: isInternalPacking ? 'Interno' : packingPartner // Log who did it
+              }
+          };
+
           await ApiService.updateProductionOrder(selectedOp.id, updatedOp);
           
           // Clear Cache
           localStorage.removeItem(`packing_cache_${selectedOp.id}`);
 
           setSelectedOp(null);
-          loadData();
+          
+          // Invalidate Queries
+          queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
+          queryClient.invalidateQueries({ queryKey: ['finishedGoods'] }); // Update Inventory too
+
           addToast({ type: 'success', title: 'Produção Finalizada', message: 'Lote entrou em estoque com sucesso!' });
       } catch (err: any) {
           addToast({ type: 'error', title: 'Erro', message: err.message });
+      } finally {
+          setIsSaving(false);
       }
   };
 
   const handleRevertToRevision = async (opId: string) => {
       setActiveMenuOpId(null);
-      if(!confirm("Estornar para Revisão?")) return;
+      
+      const confirmed = await dialog.confirm({
+          title: 'Estornar para Revisão?',
+          message: 'A OP voltará para a fase de Controle de Qualidade. Confirma?',
+          type: 'warning',
+          confirmText: 'Sim, Estornar',
+          cancelText: 'Cancelar'
+      });
+
+      if(!confirmed) return;
+
       try {
           await ApiService.revertPackingToRevision(opId);
-          loadData();
+          queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
           addToast({ type: 'info', title: 'Estorno Realizado', message: 'OP devolvida para Revisão.' });
       } catch (err: any) {
           addToast({ type: 'error', title: 'Erro', message: err.message });
@@ -305,6 +451,7 @@ export const PackingModule: React.FC = () => {
           </h1>
           <p className="text-gray-500 text-sm">Finalização de ordens e entrada em estoque.</p>
         </div>
+        {loadingOps && <div className="flex items-center gap-2 text-gray-400 text-sm"><Loader2 className="animate-spin" size={16}/> Atualizando...</div>}
       </div>
 
       {/* METRICS */}
@@ -422,8 +569,8 @@ export const PackingModule: React.FC = () => {
                   {/* Context Menu */}
                   {activeMenuOpId === op.id && (
                       <div className="absolute right-8 top-10 bg-white shadow-xl border rounded-lg z-20 w-48 overflow-hidden animate-fade-in text-left">
-                          <button onClick={() => handleRevertToRevision(op.id)} className="w-full px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-red-600 text-sm">
-                              <RotateCcw size={14}/> Estornar para Revisão
+                          <button onClick={() => handleRevertToRevision(op.id)} className="w-full px-4 py-3 hover:bg-red-50 flex items-center gap-2 text-red-600 text-sm font-medium transition-colors">
+                              <RotateCcw size={16}/> Estornar para Revisão
                           </button>
                       </div>
                   )}
@@ -515,7 +662,7 @@ export const PackingModule: React.FC = () => {
                                                   {color}
                                               </td>
                                               {(Array.from(new Set(selectedOp.items.map(i => i.size))) as string[]).sort(sortSizes).map(s => {
-                                                  const max = getApprovedQty(color, s);
+                                                  const max = getMaxPackableQty(color, s);
                                                   const current = packedMatrix[color]?.[s] || 0;
                                                   const isFull = current === max;
                                                   const isOver = current > max;
@@ -533,7 +680,7 @@ export const PackingModule: React.FC = () => {
                                                                     placeholder="0"
                                                                     onChange={e => updateMatrix(color, s, Number(e.target.value))}
                                                                   />
-                                                                  <div className="text-[9px] text-gray-400 mt-0.5 text-center">Max: {max}</div>
+                                                                  <div className="text-[9px] text-gray-400 mt-0.5 text-center">Resta: {max}</div>
                                                               </div>
                                                           ) : <span className="text-gray-200 text-xs">-</span>}
                                                       </td>
@@ -564,6 +711,67 @@ export const PackingModule: React.FC = () => {
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 border-t pt-6">
+                        
+                        {/* PARTNER SELECTION (NEW REQUIREMENT) */}
+                        <div className="col-span-2 bg-gray-50 p-4 rounded-lg border border-gray-200 mb-2">
+                            <h4 className="font-bold text-gray-700 mb-3 flex items-center gap-2">
+                                <User size={18}/> Quem realizou o serviço?
+                            </h4>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-1">
+                                        Prestador do Serviço <span className="text-red-500">*</span>
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <select 
+                                            disabled={isInternalPacking}
+                                            className={`flex-1 border rounded p-2 bg-white ${isInternalPacking ? 'bg-gray-100 text-gray-400' : ''}`}
+                                            value={packingPartner}
+                                            onChange={e => setPackingPartner(e.target.value)}
+                                        >
+                                            <option value="">Selecione...</option>
+                                            {partners.filter((p: any) => p.type === 'Embalagem' || p.type === 'Outro' || p.type === 'Facção').map((p: any) => (
+                                                <option key={p.id} value={p.name}>{p.name}</option>
+                                            ))}
+                                        </select>
+                                        <div className="flex items-center gap-2 border px-3 rounded bg-gray-50">
+                                            <input 
+                                                type="checkbox" 
+                                                id="chkInternalPacking" 
+                                                checked={isInternalPacking} 
+                                                onChange={e => { 
+                                                    setIsInternalPacking(e.target.checked); 
+                                                    if(e.target.checked) setPackingPartner(''); 
+                                                }} 
+                                            />
+                                            <label htmlFor="chkInternalPacking" className="text-sm font-bold text-gray-700 cursor-pointer">
+                                                Interno
+                                            </label>
+                                        </div>
+                                    </div>
+                                    {!isInternalPacking && (
+                                        <p className="text-xs text-green-600 mt-1 flex items-center gap-1">
+                                            <Wallet size={12}/> Irá gerar pagamento automático no financeiro.
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-1 flex items-center gap-1">Responsável (Conferente) <span className="text-red-500">*</span></label>
+                                    <input 
+                                        className={`w-full border rounded p-2 ${errors.packerName ? 'border-red-500 ring-2 ring-red-100 bg-red-50' : ''}`}
+                                        placeholder="Quem conferiu?"
+                                        value={form.packerName || ''}
+                                        onChange={e => {
+                                            setForm({...form, packerName: e.target.value});
+                                            setErrors({...errors, packerName: false});
+                                        }}
+                                    />
+                                    {errors.packerName && <p className="text-xs text-red-500 mt-1">Campo obrigatório.</p>}
+                                </div>
+                            </div>
+                        </div>
+
                         <div>
                             <label className="block text-sm font-bold text-gray-700 mb-1">Tipo de Embalagem</label>
                             <select className="w-full border rounded p-3 bg-white" 
@@ -580,7 +788,7 @@ export const PackingModule: React.FC = () => {
                             value={form.totalBoxes || ''} onChange={e => setForm({...form, totalBoxes: Number(e.target.value)})} placeholder="0"/>
                         </div>
 
-                        <div>
+                        <div className="col-span-2">
                             <label className="block text-sm font-bold text-gray-700 mb-1 flex items-center gap-1"><MapPin size={14}/> Depósito de Destino <span className="text-red-500">*</span></label>
                             <select 
                                 className={`w-full border rounded p-3 bg-white ${errors.warehouse ? 'border-red-500 ring-2 ring-red-100 bg-red-50' : 'border-pink-300 focus:ring-pink-500'}`}
@@ -595,20 +803,6 @@ export const PackingModule: React.FC = () => {
                             </select>
                             {errors.warehouse && <p className="text-xs text-red-500 mt-1">Selecione um local.</p>}
                         </div>
-
-                        <div>
-                            <label className="block text-sm font-bold text-gray-700 mb-1 flex items-center gap-1"><User size={14}/> Responsável <span className="text-red-500">*</span></label>
-                            <input 
-                                className={`w-full border rounded p-3 ${errors.packerName ? 'border-red-500 ring-2 ring-red-100 bg-red-50' : ''}`}
-                                placeholder="Quem conferiu e embalou?"
-                                value={form.packerName || ''}
-                                onChange={e => {
-                                    setForm({...form, packerName: e.target.value});
-                                    setErrors({...errors, packerName: false});
-                                }}
-                            />
-                            {errors.packerName && <p className="text-xs text-red-500 mt-1">Campo obrigatório.</p>}
-                        </div>
                     </div>
                </div>
 
@@ -618,8 +812,13 @@ export const PackingModule: React.FC = () => {
                             <Printer size={16}/> Etiquetas
                         </button>
                     </div>
-                    <button onClick={handleFinalize} className="bg-green-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-green-700 flex items-center gap-2 shadow-lg">
-                        <CheckCircle size={18}/> Finalizar OP & Estoque
+                    <button 
+                        onClick={handleFinalize} 
+                        disabled={isSaving}
+                        className="bg-green-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-green-700 flex items-center gap-2 shadow-lg disabled:opacity-50"
+                    >
+                        {isSaving ? <Loader2 className="animate-spin" size={18}/> : <CheckCircle2 size={18}/>}
+                        {isSaving ? 'Salvando...' : 'Finalizar OP & Estoque'}
                     </button>
                </div>
            </div>

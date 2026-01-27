@@ -1,31 +1,36 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
-import { SubcontractorOrder, ProductionOrder, Partner } from '../types';
+import { ProductionOrder, Partner } from '../types';
 import { ApiService } from '../services/api';
+import { supabase } from '../services/supabase'; // Direct Access for Updates
 import { 
   DollarSign, CheckCircle2, Search, Filter, 
   Wallet, AlertCircle, Clock, ChevronDown, 
-  Download, X, Banknote, CalendarDays
+  Download, X, Banknote, CalendarDays, Loader2, Tag, ArrowRight
 } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
+import { useToast } from '../contexts/ToastContext';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 interface PayableItem {
     id: string; 
     opId: string;
+    opLot?: string; // Rich Data
+    productName?: string; // Rich Data
     partner: string;
     partnerType: string;
     serviceType: string;
-    executionDate: string; // Data da realização
-    dueDate: string; // Data de Vencimento (Calculada: Exec + 24h)
+    executionDate: string; 
+    dueDate: string; 
     quantity: number;
     unitPrice: number;
     total: number;
     amountPaid: number;
     status: 'Pendente' | 'Parcial' | 'Pago';
     bankAccountName?: string;
-    // Helper status for UI
     isOverdue?: boolean;
     daysOverdue?: number;
+    daysInProduction?: number; // Calculated
 }
 
 interface FinancialFilters {
@@ -38,10 +43,33 @@ interface FinancialFilters {
 }
 
 export const PaymentsModule: React.FC = () => {
-  // State
-  const [payables, setPayables] = useState<PayableItem[]>([]);
-  const [partnersList, setPartnersList] = useState<Partner[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { addToast } = useToast();
+  const queryClient = useQueryClient();
+
+  // --- DATA FETCHING ---
+  const { data: dbPayments = [], isLoading: loadingPayments } = useQuery({
+      queryKey: ['payments'],
+      queryFn: ApiService.getPayments,
+      staleTime: 1000 * 30 // 30s
+  });
+
+  const { data: ops = [] } = useQuery({
+      queryKey: ['productionOrders'],
+      queryFn: ApiService.getProductionOrders,
+      staleTime: 1000 * 60 * 5
+  });
+
+  const { data: products = [] } = useQuery({
+      queryKey: ['products'],
+      queryFn: ApiService.getProducts,
+      staleTime: 1000 * 60 * 10
+  });
+
+  const { data: partnersList = [] } = useQuery({
+      queryKey: ['partners'],
+      queryFn: ApiService.getPartners,
+      staleTime: 1000 * 60 * 10
+  });
 
   // Filters State
   const today = new Date();
@@ -58,127 +86,119 @@ export const PaymentsModule: React.FC = () => {
 
   // Modal State
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState<PayableItem | null>(null);
   const [paymentForm, setPaymentForm] = useState({ amount: 0, bankAccount: '', paymentDate: today.toISOString().split('T')[0] });
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  // --- DATA PROCESSING (RICH LISTING) ---
+  const payables = useMemo(() => {
+      return dbPayments.map(p => {
+          // 1. Enrich with OP Data
+          const op = ops.find(o => o.id === p.opId);
+          const prod = op ? products.find(prod => prod.id === op.productId) : null;
 
-  const loadData = async () => {
-    setLoading(true);
-    // Fetch real generated payments from DB (Simulation + User Actions)
-    const [dbPayments, partners] = await Promise.all([
-        ApiService.getPayments(),
-        ApiService.getPartners()
-    ]);
+          // 2. Calculate Dates (Default Due Date = Execution + 24h)
+          let execDate = new Date(p.date);
+          if (isNaN(execDate.getTime())) execDate = new Date(); // Fallback for invalid date
 
-    setPartnersList(partners);
+          const defaultDueDate = new Date(execDate);
+          defaultDueDate.setDate(defaultDueDate.getDate() + 1); // +1 Day (24h)
+          
+          // Safe date parsing for dueDate
+          let finalDueDate = (p.dueDate || (p as any).due_date) ? new Date(p.dueDate || (p as any).due_date) : defaultDueDate;
+          if (isNaN(finalDueDate.getTime())) finalDueDate = defaultDueDate;
 
-    // Helper: Calculate Due Date (Standard: 24h after execution if not set)
-    const calculateDueDate = (dateStr: string): string => {
-        const date = new Date(dateStr);
-        date.setDate(date.getDate() + 1); // +1 Day Rule
-        return date.toISOString().split('T')[0];
-    };
-
-    // Enrich with Status Logic (Overdue)
-    const enriched: PayableItem[] = dbPayments.map(p => {
-        // Use DB date as execution date, calculate due date logic
-        const dueDate = new Date(calculateDueDate(p.date)); 
-        dueDate.setHours(0,0,0,0);
-        
-        const now = new Date();
-        now.setHours(0,0,0,0);
-        
-        const isOverdue = p.status !== 'Pago' && dueDate.getTime() < now.getTime();
-        const daysOverdue = isOverdue ? Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 3600 * 24)) : 0;
-        
-        return {
-            id: p.id,
-            opId: p.opId,
-            partner: p.partnerName,
-            partnerType: p.partnerType,
-            serviceType: p.stage,
-            executionDate: p.date,
-            dueDate: calculateDueDate(p.date),
-            quantity: p.quantityDelivered,
-            unitPrice: p.ratePerPiece,
-            total: p.totalAmount,
-            amountPaid: p.amountPaid,
-            status: p.status,
-            bankAccountName: p.bankAccountName,
-            isOverdue,
-            daysOverdue
-        };
-    });
-
-    // Sort: Overdue first, then by Due Date asc
-    enriched.sort((a,b) => {
-        if (a.isOverdue && !b.isOverdue) return -1;
-        if (!a.isOverdue && b.isOverdue) return 1;
-        return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
-    });
-
-    setPayables(enriched);
-    setLoading(false);
-  };
-
-  // --- FILTERED DATA ---
-  const filteredData = useMemo(() => {
-      return payables.filter(p => {
-          // 1. Text Search
-          const textMatch = !filters.search || 
-              p.partner.toLowerCase().includes(filters.search.toLowerCase()) || 
-              p.opId.toLowerCase().includes(filters.search.toLowerCase()) ||
-              p.id.toLowerCase().includes(filters.search.toLowerCase());
-
-          // 2. Partner Filter
-          const partnerMatch = !filters.partner || p.partner === filters.partner;
-
-          // 3. Status Filter (Smart Logic)
-          let statusMatch = true;
-          const due = new Date(p.dueDate);
-          due.setHours(0,0,0,0);
           const now = new Date();
           now.setHours(0,0,0,0);
+          finalDueDate.setHours(0,0,0,0);
+
+          const isOverdue = p.status !== 'Pago' && finalDueDate.getTime() < now.getTime();
+          const daysOverdue = isOverdue ? Math.floor((now.getTime() - finalDueDate.getTime()) / (1000 * 3600 * 24)) : 0;
+
+          // 3. Production Days Estimate
+          let daysInProduction = 0;
+          if (op && op.startDate) {
+              const start = new Date(op.startDate);
+              if (!isNaN(start.getTime())) {
+                  const end = execDate;
+                  daysInProduction = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 3600 * 24)));
+              }
+          }
+
+          return {
+              id: p.id,
+              opId: p.opId,
+              opLot: op?.lotNumber || 'N/A',
+              productName: prod?.name || 'Produto Desconhecido',
+              partner: p.partnerName,
+              partnerType: p.partnerType,
+              serviceType: p.stage || p.partnerType,
+              executionDate: execDate.toISOString(),
+              dueDate: finalDueDate.toISOString(),
+              quantity: p.quantityDelivered,
+              unitPrice: p.ratePerPiece,
+              total: p.totalAmount,
+              amountPaid: p.amountPaid,
+              status: p.status,
+              bankAccountName: p.bankAccountName,
+              isOverdue,
+              daysOverdue,
+              daysInProduction
+          } as PayableItem;
+      }).sort((a,b) => {
+          // Sort Priorities: Overdue > Due Soon > Completed
+          if (a.isOverdue && !b.isOverdue) return -1;
+          if (!a.isOverdue && b.isOverdue) return 1;
+          return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+      });
+  }, [dbPayments, ops, products]);
+
+  // --- FILTERING ---
+  const filteredData = useMemo(() => {
+      return payables.filter(p => {
+          // Text Search
+          const textMatch = !filters.search || 
+              p.partner.toLowerCase().includes(filters.search.toLowerCase()) || 
+              (p.opLot?.toLowerCase().includes(filters.search.toLowerCase()) ?? false) ||
+              (p.productName?.toLowerCase().includes(filters.search.toLowerCase()) ?? false);
+
+          // Partner
+          const partnerMatch = !filters.partner || p.partner === filters.partner;
+
+          // Status
+          let statusMatch = true;
+          const due = new Date(p.dueDate); due.setHours(0,0,0,0);
+          const now = new Date(); now.setHours(0,0,0,0);
 
           switch(filters.status) {
               case 'OVERDUE': statusMatch = p.isOverdue === true && p.status !== 'Pago'; break;
               case 'TODAY': statusMatch = due.getTime() === now.getTime() && p.status !== 'Pago'; break;
               case 'PAID': statusMatch = p.status === 'Pago'; break;
-              case 'OPEN': statusMatch = p.status !== 'Pago'; break; // Includes overdue + future
+              case 'OPEN': statusMatch = p.status !== 'Pago'; break;
               default: statusMatch = true;
           }
 
-          // 4. Date Range Filter (Applied to Due Date)
+          // Date Range (Applied to Due Date)
           let dateMatch = true;
           const filterStart = new Date(filters.startDate); filterStart.setHours(0,0,0,0);
           const filterEnd = new Date(filters.endDate); filterEnd.setHours(23,59,59,999);
           
-          if (filters.startDate && filters.endDate) {
-              const itemDate = new Date(p.dueDate);
-              itemDate.setHours(0,0,0,0);
-              dateMatch = itemDate >= filterStart && itemDate <= filterEnd;
-          }
+          const itemDate = new Date(p.dueDate); itemDate.setHours(0,0,0,0);
+          dateMatch = itemDate >= filterStart && itemDate <= filterEnd;
 
           return textMatch && partnerMatch && statusMatch && dateMatch;
       });
   }, [payables, filters]);
 
-  // --- KPI CALCULATIONS ---
-  // FIX: Using Number() to ensure math operations work correctly
+  // --- KPI STATS ---
   const stats = useMemo(() => {
       const pending = payables.filter(p => p.status !== 'Pago');
       const overdue = pending.filter(p => p.isOverdue);
-      
       const dueToday = pending.filter(p => {
           const d = new Date(p.dueDate); d.setHours(0,0,0,0);
           const n = new Date(); n.setHours(0,0,0,0);
           return d.getTime() === n.getTime();
       });
-      
-      const future = pending.filter(p => !p.isOverdue && (new Date(p.dueDate).setHours(0,0,0,0) > new Date().setHours(0,0,0,0)));
       const paid = payables.filter(p => p.status === 'Pago');
 
       const sum = (arr: PayableItem[]) => arr.reduce((acc, item) => acc + (Number(item.total) - Number(item.amountPaid)), 0);
@@ -189,10 +209,9 @@ export const PaymentsModule: React.FC = () => {
           overdueValue: sum(overdue),
           todayCount: dueToday.length,
           todayValue: sum(dueToday),
-          futureCount: future.length,
-          futureValue: sum(future),
           paidCount: paid.length,
-          paidValue: sumPaid(paid)
+          paidValue: sumPaid(paid),
+          totalOpenValue: sum(pending)
       };
   }, [payables]);
 
@@ -208,28 +227,47 @@ export const PaymentsModule: React.FC = () => {
       setIsPaymentModalOpen(true);
   };
 
-  const handleConfirmPayment = () => {
+  const handleConfirmPayment = async () => {
       if (!selectedPayment) return;
-      const newPaidAmount = selectedPayment.amountPaid + paymentForm.amount;
-      const remaining = selectedPayment.total - newPaidAmount;
-      let newStatus: 'Pendente' | 'Parcial' | 'Pago' = 'Pendente';
+      setIsProcessing(true);
+
+      const newPaidAmount = Number(selectedPayment.amountPaid) + Number(paymentForm.amount);
+      const remaining = Number(selectedPayment.total) - newPaidAmount;
+      let newStatus = 'Pendente';
       
-      if (remaining <= 0.01) newStatus = 'Pago';
+      if (remaining <= 0.05) newStatus = 'Pago'; // Tolerance for float errors
       else if (newPaidAmount > 0) newStatus = 'Parcial';
 
-      setPayables(prev => prev.map(p => p.id === selectedPayment.id ? { 
-          ...p, 
-          amountPaid: newPaidAmount,
-          status: newStatus,
-          bankAccountName: paymentForm.bankAccount
-      } : p));
+      try {
+          const { error } = await supabase
+              .from('payments')
+              .update({
+                  amount_paid: newPaidAmount,
+                  status: newStatus,
+                  bank_account_name: paymentForm.bankAccount
+              })
+              .eq('id', selectedPayment.id);
 
-      setIsPaymentModalOpen(false);
+          if (error) throw error;
+
+          addToast({ type: 'success', title: 'Pagamento Registrado', message: 'Baixa realizada com sucesso.' });
+          
+          queryClient.invalidateQueries({ queryKey: ['payments'] }); // Refresh data
+          setIsPaymentModalOpen(false);
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      } finally {
+          setIsProcessing(false);
+      }
   };
 
-  // --- HELPERS ---
   const formatCurrency = (val: number) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-  const formatDate = (d: string) => new Date(d).toLocaleDateString('pt-BR');
+  
+  const formatDate = (d: string) => {
+      if (!d) return '-';
+      const date = new Date(d);
+      return isNaN(date.getTime()) ? '-' : date.toLocaleDateString('pt-BR');
+  };
 
   return (
     <div className="space-y-6 pb-20 animate-fade-in bg-gray-50/50 min-h-screen">
@@ -241,8 +279,10 @@ export const PaymentsModule: React.FC = () => {
           </h1>
           <p className="text-gray-500 text-sm mt-1">Gestão financeira de facções e prestadores de serviço terceirizados.</p>
         </div>
-        <div className="text-xs text-gray-400 bg-white px-3 py-1 rounded border shadow-sm">
-            Vencimento Padrão: <b>24h</b> após execução
+        <div className="flex flex-col items-end">
+            <div className="text-xs text-gray-400 bg-white px-3 py-1 rounded border shadow-sm flex items-center gap-1">
+                <Clock size={12}/> Vencimento Padrão: <b>24h</b> após execução
+            </div>
         </div>
       </div>
 
@@ -274,20 +314,20 @@ export const PaymentsModule: React.FC = () => {
               <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.todayValue)}</div>
           </div>
 
-          {/* Card 3: A Vencer (Future) */}
+          {/* Card 3: Total Aberto */}
           <div 
             onClick={() => setFilters({...filters, status: 'OPEN'})}
             className="bg-white p-5 rounded-xl border-l-4 border-gray-300 shadow-sm cursor-pointer transition-all hover:shadow-md"
           >
               <div className="flex justify-between items-start mb-2">
-                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><span title="Relógio"><Clock size={20}/></span></div>
-                  <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">{stats.futureCount} títulos</span>
+                  <div className="p-2 bg-gray-50 text-gray-600 rounded-lg"><span title="Relógio"><DollarSign size={20}/></span></div>
+                  <span className="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded-full">Total Pendente</span>
               </div>
-              <div className="text-gray-500 text-xs font-bold uppercase">A Vencer (Futuro)</div>
-              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.futureValue)}</div>
+              <div className="text-gray-500 text-xs font-bold uppercase">Carteira em Aberto</div>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(stats.totalOpenValue)}</div>
           </div>
 
-          {/* Card 4: Pago (History) */}
+          {/* Card 4: Pago */}
           <div 
             onClick={() => setFilters({...filters, status: 'PAID'})}
             className={`bg-white p-5 rounded-xl border-l-4 shadow-sm cursor-pointer transition-all hover:shadow-md ${filters.status === 'PAID' ? 'ring-2 ring-green-500 border-green-500' : 'border-green-500'}`}
@@ -296,27 +336,25 @@ export const PaymentsModule: React.FC = () => {
                   <div className="p-2 bg-green-50 text-green-600 rounded-lg"><span title="Confirmado"><CheckCircle2 size={20}/></span></div>
                   <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">{stats.paidCount} pagos</span>
               </div>
-              <div className="text-gray-500 text-xs font-bold uppercase">Total Pago</div>
+              <div className="text-gray-500 text-xs font-bold uppercase">Total Pago (Mês)</div>
               <div className="text-2xl font-bold text-green-700 mt-1">{formatCurrency(stats.paidValue)}</div>
           </div>
       </div>
 
-      {/* PROFESSIONAL FILTERS TOOLBAR */}
+      {/* FILTERS TOOLBAR */}
       <div className="bg-white p-4 rounded-xl border shadow-sm flex flex-col lg:flex-row gap-4 lg:items-center justify-between">
           <div className="flex flex-col lg:flex-row gap-4 flex-1">
-              {/* Search */}
               <div className="relative w-full lg:w-64">
                   <span title="Busca" className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"><Search size={18}/></span>
                   <input 
                     type="text" 
-                    placeholder="Buscar Ref, OP ou Parceiro..."
+                    placeholder="Buscar OP, Lote ou Produto..."
                     className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 outline-none text-sm"
                     value={filters.search}
                     onChange={e => setFilters({...filters, search: e.target.value})}
                   />
               </div>
 
-              {/* Status Dropdown */}
               <div className="relative">
                   <select 
                     className="w-full lg:w-40 pl-3 pr-8 py-2 border rounded-lg appearance-none bg-white text-sm focus:ring-2 focus:ring-green-500 outline-none cursor-pointer"
@@ -332,7 +370,6 @@ export const PaymentsModule: React.FC = () => {
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"><ChevronDown size={16}/></span>
               </div>
 
-              {/* Partner Dropdown */}
               <div className="relative">
                   <select 
                     className="w-full lg:w-48 pl-3 pr-8 py-2 border rounded-lg appearance-none bg-white text-sm focus:ring-2 focus:ring-green-500 outline-none cursor-pointer"
@@ -347,7 +384,6 @@ export const PaymentsModule: React.FC = () => {
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"><ChevronDown size={16}/></span>
               </div>
 
-              {/* Modern Date Picker */}
               <ModernDatePicker 
                   startDate={filters.startDate}
                   endDate={filters.endDate}
@@ -370,15 +406,16 @@ export const PaymentsModule: React.FC = () => {
           </div>
       </div>
 
-      {/* PAYABLES TABLE */}
+      {/* RICH PAYABLES TABLE */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
           <table className="w-full text-left text-sm">
               <thead className="bg-gray-50 text-gray-600 font-bold border-b">
                   <tr>
                       <th className="p-4 w-10">St</th>
                       <th className="p-4">Vencimento</th>
+                      <th className="p-4">OP / Lote</th>
                       <th className="p-4">Favorecido (Parceiro)</th>
-                      <th className="p-4">Referência / Serviço</th>
+                      <th className="p-4">Detalhes do Serviço</th>
                       <th className="p-4 text-right">Valor Total</th>
                       <th className="p-4 text-right">A Pagar</th>
                       <th className="p-4 text-center">Ações</th>
@@ -407,12 +444,23 @@ export const PaymentsModule: React.FC = () => {
                                   <div className="text-xs text-gray-400">Exec: {formatDate(item.executionDate)}</div>
                               </td>
                               <td className="p-4">
-                                  <div className="font-medium text-gray-900">{item.partner}</div>
-                                  <div className="text-xs text-gray-500">{item.partnerType} • {item.bankAccountName || 'S/ Conta Cadastrada'}</div>
+                                  <div className="font-mono text-sm font-bold text-blue-600 flex items-center gap-1">
+                                      <Tag size={12}/> {item.opLot}
+                                  </div>
+                                  <div className="text-xs text-gray-500 truncate max-w-[150px]" title={item.productName}>
+                                      {item.productName}
+                                  </div>
                               </td>
                               <td className="p-4">
-                                  <div className="font-mono text-xs text-blue-600 font-bold bg-blue-50 w-fit px-2 py-0.5 rounded mb-1">{item.id}</div>
-                                  <div className="text-gray-600">{item.serviceType} <span className="text-gray-400 text-xs">(OP: {item.opId})</span></div>
+                                  <div className="font-medium text-gray-900">{item.partner}</div>
+                                  <div className="text-xs text-gray-500">{item.partnerType}</div>
+                              </td>
+                              <td className="p-4">
+                                  <div className="text-gray-700 font-medium">{item.serviceType}</div>
+                                  <div className="text-xs text-gray-400 flex items-center gap-2">
+                                      <span>Qtd: <b>{item.quantity}</b></span>
+                                      <span>Taxa: <b>{formatCurrency(item.unitPrice)}</b></span>
+                                  </div>
                               </td>
                               <td className="p-4 text-right text-gray-500">
                                   {formatCurrency(item.total)}
@@ -440,7 +488,7 @@ export const PaymentsModule: React.FC = () => {
                       );
                   })}
                   {filteredData.length === 0 && (
-                      <tr><td colSpan={7} className="p-12 text-center text-gray-400">Nenhum título encontrado com os filtros selecionados.</td></tr>
+                      <tr><td colSpan={8} className="p-12 text-center text-gray-400">Nenhum título encontrado com os filtros selecionados.</td></tr>
                   )}
               </tbody>
           </table>
@@ -456,7 +504,7 @@ export const PaymentsModule: React.FC = () => {
                   </div>
                   <div className="p-6 space-y-5">
                       <div className="bg-gray-50 p-4 rounded-lg border text-center">
-                          <div className="text-xs text-gray-500 uppercase font-bold mb-1">Valor em Aberto</div>
+                          <div className="text-xs text-gray-500 uppercase font-bold mb-1">Referente à OP {selectedPayment.opLot}</div>
                           <div className="text-3xl font-bold text-gray-800">
                               {formatCurrency(selectedPayment.total - selectedPayment.amountPaid)}
                           </div>
@@ -500,10 +548,12 @@ export const PaymentsModule: React.FC = () => {
                       </div>
 
                       <button 
-                        onClick={handleConfirmPayment} 
-                        className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 shadow-lg flex justify-center items-center gap-2 mt-4"
+                        onClick={handleConfirmPayment}
+                        disabled={isProcessing}
+                        className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 shadow-lg flex justify-center items-center gap-2 mt-4 disabled:opacity-50"
                       >
-                          <span title="Confirmar"><CheckCircle2 size={18}/></span> Confirmar Baixa
+                          {isProcessing ? <Loader2 className="animate-spin" size={18}/> : <CheckCircle2 size={18}/>} 
+                          Confirmar Baixa
                       </button>
                   </div>
               </div>

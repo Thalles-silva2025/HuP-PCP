@@ -2,9 +2,12 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, ProductionOrderItem, Product, SubcontractorOrder } from '../types';
 import { ApiService } from '../services/api';
-import { ClipboardCheck, CheckCircle2, AlertTriangle, ArrowRight, Save, X, Search, RotateCw, ArrowDown, Scissors, HelpCircle, AlertOctagon, Loader2, Truck, User, MoreVertical, RotateCcw, RefreshCw, Database, Info } from 'lucide-react';
+import { ClipboardCheck, CheckCircle2, AlertTriangle, ArrowRight, Save, X, Search, RotateCw, ArrowDown, Scissors, HelpCircle, AlertOctagon, Loader2, Truck, User, MoreVertical, RotateCcw, RefreshCw, Database, Info, Wallet } from 'lucide-react';
 import { ModernDatePicker } from './ModernDatePicker';
 import { useToast } from '../contexts/ToastContext';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '../services/supabase'; // Access for Payments & Updates
+import { useAuth } from '../contexts/AuthContext'; // Access for Org ID
 
 interface DateRange {
     label: string;
@@ -43,21 +46,54 @@ const sortSizes = (a: string, b: string) => {
     return a.localeCompare(b);
 };
 
+// Helper: Normalize status checking
+const isStatusCompleted = (status: string) => {
+    const s = status?.toLowerCase().trim() || '';
+    return s === 'concluido' || s === 'concluído' || s === 'completed';
+};
+
 // Type for the dynamic matrices
 type RevisionMatrix = Record<string, Record<string, number>>;
 
 export const RevisionModule: React.FC = () => {
   const { addToast } = useToast();
-  const [ops, setOps] = useState<ProductionOrder[]>([]);
-  const [completedOps, setCompletedOps] = useState<ProductionOrder[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [osfs, setOsfs] = useState<SubcontractorOrder[]>([]); // New: Store OSFs for context logic
-  
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  // --- 2. IMPLEMENTE A CACHE INTELIGENTE NESTE MODULO TAMBEM ---
+  const { data: allOps = [], isLoading: loadingOps } = useQuery({
+      queryKey: ['productionOrders'],
+      queryFn: ApiService.getProductionOrders,
+      staleTime: 1000 * 60 * 2 // 2 minutos de cache
+  });
+
+  const { data: products = [] } = useQuery({
+      queryKey: ['products'],
+      queryFn: ApiService.getProducts,
+      staleTime: 1000 * 60 * 5
+  });
+
+  const { data: osfs = [] } = useQuery({
+      queryKey: ['subcontractorOrders'],
+      queryFn: ApiService.getSubcontractorOrders,
+      staleTime: 1000 * 30
+  });
+
+  const { data: partners = [] } = useQuery({
+      queryKey: ['partners'],
+      queryFn: ApiService.getPartners,
+      staleTime: 1000 * 60 * 10
+  });
+
+  // Local State
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
   const [inspectorName, setInspectorName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
   
+  // Partner Selection State (New)
+  const [revisionPartner, setRevisionPartner] = useState('');
+  const [isInternalRevision, setIsInternalRevision] = useState(true);
+
   // Menu State
   const [activeMenuOpId, setActiveMenuOpId] = useState<string | null>(null);
   
@@ -93,10 +129,6 @@ export const RevisionModule: React.FC = () => {
   const [reworkResponsible, setReworkResponsible] = useState('');
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   // Fechar menu ao clicar fora
   useEffect(() => {
       const handleClickOutside = () => setActiveMenuOpId(null);
@@ -104,47 +136,51 @@ export const RevisionModule: React.FC = () => {
       return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
-  const loadData = async () => {
-    setIsLoading(true);
-    try {
-        const [allOps, allProds, allOsfs] = await Promise.all([
-            ApiService.getProductionOrders(),
-            ApiService.getProducts(),
-            ApiService.getSubcontractorOrders()
-        ]);
-        allOps.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  // --- DATA FILTERING LOGIC ---
 
-        // Pendentes: Status REVISÃO
-        setOps(allOps.filter(op => op.status === OrderStatus.QUALITY_CONTROL));
-        
-        // Histórico: Status EMBALAGEM ou CONCLUÍDO e que tenha detalhes de revisão
-        setCompletedOps(allOps.filter(op => 
-            (op.status === OrderStatus.PACKING || op.status === OrderStatus.COMPLETED) && 
-            op.revisionDetails && 
-            op.revisionDetails.isFinalized
-        ));
-        
-        setProducts(allProds);
-        setOsfs(allOsfs);
-    } catch (err: any) {
-        addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados.' });
-    } finally {
-        setIsLoading(false);
-    }
-  };
+  // 1. OPs Pendentes (Inteligente & Resgate)
+  const ops = useMemo(() => {
+      return allOps.filter(op => {
+          // Status explícito de Revisão
+          if (op.status === OrderStatus.QUALITY_CONTROL) return true;
 
-  const getProductDisplayName = (productId: string) => {
-      const prod = products.find(p => p.id === productId);
-      if (prod) return `${prod.sku} - ${prod.name}`;
-      return productId;
-  };
+          // 1. O MODULO REVISAO E EMBALAGEM NAO CARREGA OS DADOS DO BANCO DE DADOS DAS OPS FINALIZADAS NO MODULO FACCAO...
+          // REGRA DE RESGATE: OPs que estão "Em Costura" mas com Facção 100% Concluída
+          if (op.status === OrderStatus.SEWING) {
+              const opOsfs = osfs.filter(o => o.opId === op.id);
+              
+              if (opOsfs.length === 0) return false; // Se não tem OSF e tá em costura, ignora (ou é interno sem apontamento)
 
+              // Verifica se TODAS as OSFs desta OP estão concluídas
+              const allFinished = opOsfs.every(o => 
+                  o.status?.toLowerCase() === 'concluido' || o.status?.toLowerCase() === 'concluído'
+              );
+              
+              // Verificação extra de segurança: Quantidade Recebida >= Enviada
+              const totalSent = opOsfs.reduce((a,b) => a + (b.sentQuantity || 0), 0);
+              const totalReceived = opOsfs.reduce((a,b) => a + (b.receivedQuantity || 0), 0);
+              const receivedEnough = totalReceived >= totalSent; // Tolerância zero pra baixo
+
+              return allFinished && receivedEnough;
+          }
+
+          return false;
+      }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [allOps, osfs]);
+
+  // 2. Histórico
   const filteredHistory = useMemo(() => {
+      const completedOps = allOps.filter(op => 
+          (op.status === OrderStatus.PACKING || op.status === OrderStatus.COMPLETED) && 
+          op.revisionDetails && 
+          op.revisionDetails.isFinalized
+      );
+
       const start = new Date(dateRange.start).setHours(0,0,0,0);
       const end = new Date(dateRange.end).setHours(23,59,59,999);
 
       return completedOps.filter(op => {
-          const prodName = getProductDisplayName(op.productId);
+          const prodName = products.find(p => p.id === op.productId)?.name || op.productId;
           const revDate = new Date(op.revisionDetails?.endDate || op.createdAt).getTime();
           const dateMatch = revDate >= start && revDate <= end;
           const searchMatch = !searchTerm || 
@@ -152,8 +188,8 @@ export const RevisionModule: React.FC = () => {
               prodName.toLowerCase().includes(searchTerm.toLowerCase()) ||
               (op.revisionDetails?.inspectorName || '').toLowerCase().includes(searchTerm.toLowerCase());
           return dateMatch && searchMatch;
-      });
-  }, [completedOps, dateRange, searchTerm, products]);
+      }).sort((a, b) => new Date(b.revisionDetails?.endDate || '').getTime() - new Date(a.revisionDetails?.endDate || '').getTime());
+  }, [allOps, products, dateRange, searchTerm]);
 
   // --- KPI STATS ---
   const stats = useMemo(() => {
@@ -162,8 +198,9 @@ export const RevisionModule: React.FC = () => {
       let totalRework = 0;
       let totalRejected = 0;
 
-      completedOps.forEach(op => {
-          if (op.revisionDetails) {
+      // Calculate stats based on COMPLETED revisions
+      allOps.forEach(op => {
+          if (op.revisionDetails && op.revisionDetails.isFinalized) {
               const approved = Number(op.revisionDetails.approvedQty) || 0;
               const rework = Number(op.revisionDetails.reworkQty) || 0;
               const rejected = Number(op.revisionDetails.rejectedQty) || 0;
@@ -176,18 +213,80 @@ export const RevisionModule: React.FC = () => {
       });
 
       return { totalReviewed, totalApproved, totalRework, totalRejected };
-  }, [completedOps]);
+  }, [allOps]);
 
-  // --- ACTIONS ---
+  const getProductDisplayName = (productId: string) => {
+      const prod = products.find(p => p.id === productId);
+      if (prod) return `${prod.sku} - ${prod.name}`;
+      return productId;
+  };
 
   const handleRevertOp = async () => {
       if (!opToRevert) return;
       
+      // VALIDAÇÃO 1: BLOQUEAR SE JÁ TIVER CONFERÊNCIA INICIADA
+      const details = opToRevert.revisionDetails;
+      const hasProgress = details && (
+          (details.approvedQty || 0) > 0 ||
+          (details.reworkQty || 0) > 0 ||
+          (details.rejectedQty || 0) > 0 ||
+          (details.missingQty || 0) > 0
+      );
+
+      if (hasProgress) {
+          addToast({ 
+              type: 'warning', 
+              title: 'Estorno Bloqueado', 
+              message: 'Não é possível estornar lote com conferência iniciada. Zere os valores antes de devolver para Facção.' 
+          });
+          setOpToRevert(null);
+          return;
+      }
+
+      // VALIDAÇÃO 2: BLOQUEAR SE FOR RETRABALHO
+      // Encontrar a última OSF concluída para esta OP para saber se é retrabalho
+      const relatedOsfs = osfs.filter(o => o.opId === opToRevert.id && (isStatusCompleted(o.status) || o.status === 'Parcial'));
+      // Ordena decrescente por data de retorno
+      const latestOsf = relatedOsfs.sort((a,b) => new Date(b.returnDate || b.sentDate).getTime() - new Date(a.returnDate || a.sentDate).getTime())[0];
+
+      if (latestOsf && (latestOsf.type === 'Retrabalho' || latestOsf.type === 'Conserto')) {
+          addToast({ 
+              type: 'warning', 
+              title: 'Estorno Bloqueado', 
+              message: 'Lotes de Retrabalho não podem ser estornados para Facção.' 
+          });
+          setOpToRevert(null);
+          return;
+      }
+
       try {
+          // 1. Reverte o status da OP para 'Em Costura'
           await ApiService.revertRevisionToSubcontractor(opToRevert.id);
+
+          // 2. CORREÇÃO CRÍTICA: Reabre a OSF (Facção) no Banco de Dados
+          // Muda de 'Concluido' para 'Parcial' (ou 'Enviado') para que ela volte a ser "Ativa" no módulo Facção
+          // e saia da lista de "Resgate" do módulo Revisão.
+          
+          const { error: osfError } = await supabase
+              .from('subcontractor_orders')
+              .update({ status: 'Parcial' }) // Status Parcial mantém a OSF ativa
+              .eq('op_id', opToRevert.id)
+              .or('status.eq.Concluido,status.eq.Concluído,status.eq.Completed'); // Filtra apenas as concluídas
+
+          if (osfError) {
+              console.error("Erro ao reabrir OSF:", osfError);
+              throw new Error("Erro ao atualizar status da facção.");
+          }
+
           addToast({ type: 'success', title: 'Estorno Realizado', message: `O lote ${opToRevert.lotNumber} voltou para a fase de Costura/Facção.` });
           setOpToRevert(null);
-          loadData();
+          
+          // Invalida as queries para atualizar as listas imediatamente
+          await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ['productionOrders'] }),
+              queryClient.invalidateQueries({ queryKey: ['subcontractorOrders'] })
+          ]);
+          
       } catch (error: any) {
           addToast({ type: 'error', title: 'Erro no Estorno', message: error.message });
       }
@@ -197,7 +296,7 @@ export const RevisionModule: React.FC = () => {
   const determineContext = (op: ProductionOrder) => {
       // Find latest completed OSF for this OP
       const opOsfs = osfs
-          .filter(o => o.opId === op.id && o.status === 'Concluido')
+          .filter(o => o.opId === op.id && (o.status?.toLowerCase() === 'concluido' || o.status?.toLowerCase() === 'concluído'))
           .sort((a,b) => new Date(b.returnDate || '').getTime() - new Date(a.returnDate || '').getTime());
       
       const latestOsf = opOsfs[0];
@@ -214,10 +313,6 @@ export const RevisionModule: React.FC = () => {
       };
 
       if (isRework) {
-          // In rework mode, we expect ONLY what came back from the rework order
-          // The grid should be based on items_returned from the OSF (what was fixed)
-          // Fallback to items_snapshot (what was sent) if returned is empty
-          
           let reworkItems: ProductionOrderItem[] = [];
           if (latestOsf.itemsReturned && latestOsf.itemsReturned.length > 0) {
               reworkItems = latestOsf.itemsReturned as ProductionOrderItem[];
@@ -227,6 +322,9 @@ export const RevisionModule: React.FC = () => {
               // Fallback to OP items but scale quantity (Last resort)
               reworkItems = op.items.map(i => ({...i, quantity: 0})); 
           }
+
+          // FILTER: Ensure we only consider items with quantity > 0
+          reworkItems = reworkItems.filter(i => i.quantity > 0);
 
           return {
               isRework: true,
@@ -241,7 +339,7 @@ export const RevisionModule: React.FC = () => {
           isRework: false,
           expectedQty: op.quantityTotal,
           expectedItems: op.items,
-          previousStats: { approved: 0, rework: 0, rejected: 0, missing: 0 } // No prev stats in normal mode usually
+          previousStats: { approved: 0, rework: 0, rejected: 0, missing: 0 }
       };
   };
 
@@ -276,13 +374,16 @@ export const RevisionModule: React.FC = () => {
           setMatrixTab('approved');
           setShowReworkModal(false);
           setReworkResponsible('');
+          
+          // Reset Partner Fields
+          setIsInternalRevision(true);
+          setRevisionPartner('');
       }
-  }, [selectedOp, osfs]); // Depend on OSFs to ensure context is correct
+  }, [selectedOp, osfs]);
 
   // --- LOGIC HELPERS ---
 
   const getPlannedQty = (color: string, size: string) => {
-      // Use revisionContext to get the correct limit (Rework limit vs Full Batch limit)
       return revisionContext.expectedItems.find(i => i.color === color && i.size === size)?.quantity || 0;
   };
 
@@ -333,7 +434,7 @@ export const RevisionModule: React.FC = () => {
       const totalMissing = calculateMatrixTotal(missingMatrix);
       
       const totalCounted = totalApproved + totalRework + totalDefect + totalMissing;
-      const totalPlanned = revisionContext.expectedQty; // Compare against context qty (e.g., 5 for rework)
+      const totalPlanned = revisionContext.expectedQty;
       
       return {
           valid: totalCounted === totalPlanned,
@@ -348,8 +449,15 @@ export const RevisionModule: React.FC = () => {
       if (!selectedOp) return;
       if (isSaving) return;
 
+      // VALIDATION: Inspector
       if (!inspectorName.trim()) {
           addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Informe o responsável pela revisão.' });
+          return;
+      }
+
+      // VALIDATION: Partner
+      if (!isInternalRevision && !revisionPartner) {
+          addToast({ type: 'error', title: 'Campo Obrigatório', message: 'Selecione o parceiro externo ou marque como Interno.' });
           return;
       }
 
@@ -363,13 +471,11 @@ export const RevisionModule: React.FC = () => {
           return;
       }
 
-      // Prepare Breakdown Arrays
       const itemsApproved = convertMatrixToItems(approvedMatrix);
       const itemsRework = convertMatrixToItems(reworkMatrix);
       const itemsRejected = convertMatrixToItems(defectMatrix);
       const itemsMissing = convertMatrixToItems(missingMatrix);
 
-      // Store pending data structure
       const saveData = {
           validation,
           itemsApproved,
@@ -380,23 +486,20 @@ export const RevisionModule: React.FC = () => {
 
       setPendingSaveData(saveData);
 
-      // --- CHECK IF REWORK IS NEEDED ---
       if (validation.breakdown.totalRework > 0) {
           setShowReworkModal(true);
           return;
       }
 
-      // If no rework, proceed to finish
       await executeFinalize(saveData);
   };
 
   const executeFinalize = async (data: any, reworkResp?: string) => {
       setIsSaving(true);
       try {
-          // --- AUTOMATIC REWORK LOGIC ---
+          // 1. GENERATE REWORK OSF (IF NEEDED)
           if (data.validation.breakdown.totalRework > 0) {
               const description = `Peças reprovadas na revisão ${revisionContext.isRework ? '(2º Ciclo)' : ''}. Envio autorizado por: ${reworkResp || inspectorName}`;
-              
               await ApiService.createReworkOrder(
                   selectedOp!.id,
                   selectedOp!.subcontractor || 'Interno',
@@ -404,65 +507,78 @@ export const RevisionModule: React.FC = () => {
                   data.itemsRework, 
                   description
               );
-              
               addToast({ type: 'info', title: 'Remessa Gerada', message: 'Ordem de Retrabalho criada e enviada para a facção.' });
           }
 
-          // --- CUMULATIVE STATS LOGIC ---
-          // If isRework, we add current results to previous stats
-          // We subtract current reviewed quantity from 'reworkQty' bucket because they are now resolved (either approved, lost or rework again)
-          
+          // 2. GENERATE PAYMENT (IF EXTERNAL PARTNER)
+          // QUERO QUE AO INICIAR UMA REVISAO TENHA COMO INSERIR UM PARCEIRO DE TRABALHO PJ...
+          if (!isInternalRevision && revisionPartner) {
+              const partner = partners.find(p => p.name === revisionPartner);
+              if (partner && partner.defaultRate && partner.defaultRate > 0) {
+                  const totalInspected = data.validation.totalCounted;
+                  const paymentValue = totalInspected * partner.defaultRate;
+                  
+                  // Need to get OrgID to insert payment manually
+                  const { data: profile } = await supabase.from('user_profiles').select('organization_id').eq('id', user?.id).single();
+                  
+                  if (profile) {
+                      await supabase.from('payments').insert({
+                          organization_id: profile.organization_id,
+                          op_id: selectedOp!.id,
+                          partner_name: partner.name,
+                          partner_type: 'Revisão',
+                          stage: 'Revisão',
+                          total_amount: paymentValue,
+                          amount_paid: 0,
+                          quantity_delivered: totalInspected,
+                          rate_per_piece: partner.defaultRate,
+                          status: 'Pendente',
+                          due_date: new Date(Date.now() + 86400000).toISOString() // +1 Day
+                      });
+                      addToast({ type: 'success', title: 'Financeiro', message: `Pagamento gerado para ${partner.name}.` });
+                  }
+              }
+          }
+
           let finalApprovedQty = Number(data.validation.breakdown.totalApproved);
           let finalReworkQty = Number(data.validation.breakdown.totalRework);
           let finalRejectedQty = Number(data.validation.breakdown.totalDefect);
           let finalMissingQty = Number(data.validation.breakdown.totalMissing);
 
           if (revisionContext.isRework) {
-              // Merge logic:
-              // Approved = Old Approved + New Approved
               finalApprovedQty += revisionContext.previousStats.approved;
-              
-              // Rejected = Old Rejected + New Rejected
               finalRejectedQty += revisionContext.previousStats.rejected;
-              
-              // Missing = Old Missing + New Missing
               finalMissingQty += revisionContext.previousStats.missing;
-
-              // Rework Balance = (Old Rework - Qty Reviewed Now) + New Rework
-              // Qty Reviewed Now should equal Old Rework ideally, but practically it's what came back.
-              // Logic: The "Old Rework" pending bucket is cleared by processing this batch, and "New Rework" fills it again if any.
               const pendingReworkBalance = Math.max(0, revisionContext.previousStats.rework - revisionContext.expectedQty);
               finalReworkQty += pendingReworkBalance;
           }
 
-          // MERGE ITEMS ARRAYS (Simplification: Just concat for now, ideal would be to merge by color/size)
-          // For visualization, we keep the latest snapshot usually, but for packing we might need full list.
-          // Since packing uses simple totals mostly, passing the latest detailed + cumulative total is acceptable.
-          // IMPORTANT: If we are in rework mode, we should ideally merge the itemsApproved array with previous itemsApproved.
-          // For simplicity and safety in this locked module, we will stick to updating totals which drive the main status.
+          // 4. LOG EVENT
+          const newEvent = {
+              date: new Date().toISOString(),
+              user: inspectorName,
+              action: 'Revisão Concluída',
+              description: `Revisão finalizada. Aprovados: ${finalApprovedQty}, Retrabalho: ${finalReworkQty}, Perda: ${finalRejectedQty}. Executor: ${isInternalRevision ? 'Interno' : revisionPartner}`,
+              type: 'status_change' as const
+          };
 
           const updatedOp = {
               ...selectedOp,
               status: OrderStatus.PACKING, 
               revisionDetails: {
                   inspectorName,
-                  
-                  // UPDATED TOTALS
                   approvedQty: finalApprovedQty,
-                  itemsApproved: data.itemsApproved, // Note: This replaces detail. Ideally we merge, but UI uses total mainly.
-                  
+                  itemsApproved: data.itemsApproved,
                   reworkQty: finalReworkQty,
                   itemsRework: data.itemsRework,
-                  
                   rejectedQty: finalRejectedQty,
                   itemsRejected: data.itemsRejected,
-                  
                   missingQty: finalMissingQty,
                   itemsMissing: data.itemsMissing,
-
                   isFinalized: true,
                   endDate: new Date().toISOString()
-              }
+              },
+              events: [...(selectedOp!.events || []), newEvent]
           };
 
           await ApiService.updateProductionOrder(selectedOp!.id, updatedOp);
@@ -470,7 +586,7 @@ export const RevisionModule: React.FC = () => {
           setSelectedOp(null);
           setShowReworkModal(false);
           setPendingSaveData(null);
-          await loadData(); 
+          queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
           addToast({ type: 'success', title: 'Revisão Concluída', message: 'Ordem enviada para Embalagem com sucesso.' });
       } catch (err: any) {
           addToast({ type: 'error', title: 'Erro ao Salvar', message: err.message });
@@ -493,7 +609,7 @@ export const RevisionModule: React.FC = () => {
   const renderInputMatrix = (
       currentMatrix: RevisionMatrix, 
       setMatrixFunc: React.Dispatch<React.SetStateAction<RevisionMatrix>>,
-      colorTheme: string // 'purple' | 'yellow' | 'red' | 'gray'
+      colorTheme: string 
   ) => {
       if (!selectedOp) return null;
       
@@ -505,10 +621,10 @@ export const RevisionModule: React.FC = () => {
       };
       const theme = themeColors[colorTheme];
 
-      // Get colors/sizes from expected items context, not full OP items
-      // SORT SIZES HERE
-      const expectedSizes = Array.from(new Set(revisionContext.expectedItems.map(i => i.size))).sort(sortSizes) as string[];
-      const expectedColors = Array.from(new Set(revisionContext.expectedItems.map(i => i.color))) as string[];
+      // FILTERED EXPECTED ITEMS: Only > 0
+      const validItems = revisionContext.expectedItems.filter(i => i.quantity > 0);
+      const expectedSizes = Array.from(new Set(validItems.map(i => i.size))).sort(sortSizes) as string[];
+      const expectedColors = Array.from(new Set(validItems.map(i => i.color))) as string[];
 
       return (
           <div className={`border-2 ${theme.border} rounded-xl overflow-hidden shadow-sm bg-white`}>
@@ -566,7 +682,6 @@ export const RevisionModule: React.FC = () => {
                               </tr>
                           )
                       })}
-                      {/* GRAND TOTAL */}
                       <tr className={`${theme.bg} font-bold border-t-2 ${theme.border} ${theme.text}`}>
                           <td className="p-3 text-left">TOTAL ABA</td>
                           {expectedSizes.map(s => (
@@ -593,12 +708,15 @@ export const RevisionModule: React.FC = () => {
           </h1>
           <p className="text-gray-500 text-sm">Controle de qualidade e segregação de peças defeituosas.</p>
         </div>
-        <button 
-            onClick={loadData} 
-            className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-sm font-medium shadow-sm transition-colors"
-        >
-            <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''}/> Atualizar Dados
-        </button>
+        <div className="flex items-center gap-2">
+            {loadingOps && <Loader2 className="animate-spin text-purple-600"/>}
+            <button 
+                onClick={() => queryClient.invalidateQueries()} 
+                className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-sm font-medium shadow-sm transition-colors"
+            >
+                <RefreshCw size={16}/> Atualizar
+            </button>
+        </div>
       </div>
 
       {/* TOP METRICS GRID */}
@@ -689,6 +807,7 @@ export const RevisionModule: React.FC = () => {
               <th className="p-4">Produto</th>
               <th className="p-4">{activeTab === 'pending' ? 'Retorno Facção' : 'Conclusão Revisão'}</th>
               <th className="p-4">{activeTab === 'pending' ? 'Data Chegada' : 'Responsável'}</th>
+              <th className="p-4 text-center">Qtd</th>
               <th className="p-4 text-right">Ação</th>
             </tr>
           </thead>
@@ -705,10 +824,12 @@ export const RevisionModule: React.FC = () => {
                 <td className="p-4 text-gray-500">
                     {activeTab === 'pending' ? new Date(op.revisionDetails?.startDate || op.createdAt).toLocaleDateString() : op.revisionDetails?.inspectorName}
                 </td>
+                <td className="p-4 text-center font-bold text-gray-700">
+                    {op.quantityTotal}
+                </td>
                 <td className="p-4 text-right">
                   {activeTab === 'pending' ? (
                       <div className="flex items-center justify-end gap-2 relative">
-                          {/* 3 Dots Menu Button */}
                           <button 
                             onClick={(e) => { e.stopPropagation(); setActiveMenuOpId(activeMenuOpId === op.id ? null : op.id); }}
                             className="p-2 rounded-lg text-gray-400 hover:text-purple-600 hover:bg-purple-50 transition-colors"
@@ -716,7 +837,6 @@ export const RevisionModule: React.FC = () => {
                               <MoreVertical size={18}/>
                           </button>
 
-                          {/* Context Menu Dropdown */}
                           {activeMenuOpId === op.id && (
                               <div className="absolute right-0 top-10 bg-white border border-gray-200 rounded-lg shadow-xl z-20 w-48 overflow-hidden animate-fade-in text-left">
                                   <button 
@@ -745,7 +865,7 @@ export const RevisionModule: React.FC = () => {
               </tr>
             ))}
             {(activeTab === 'pending' ? ops : filteredHistory).length === 0 && (
-                <tr><td colSpan={5} className="p-8 text-center text-gray-400">Nenhum registro encontrado.</td></tr>
+                <tr><td colSpan={6} className="p-8 text-center text-gray-400">Nenhum registro encontrado.</td></tr>
             )}
           </tbody>
         </table>
@@ -907,7 +1027,10 @@ export const RevisionModule: React.FC = () => {
                           </div>
                           <div className="border-r border-slate-600">
                               <div className="text-xs text-slate-400 uppercase">Retrabalho</div>
-                              <div className="text-xl font-bold text-yellow-400">{validationStatus.breakdown.totalRework}</div>
+                              {/* 1. QUERO INCLUIR QUANDO FOR RETRABALHO A QUANTIDADE DO RETRABALHO E A QUANTIDADE TOTAL */}
+                              <div className="text-xl font-bold text-yellow-400">
+                                  {validationStatus.breakdown.totalRework} <span className="text-sm text-slate-500">/ {validationStatus.totalCounted}</span>
+                              </div>
                           </div>
                           <div className="border-r border-slate-600">
                               <div className="text-xs text-slate-400 uppercase">Defeito</div>
@@ -933,14 +1056,61 @@ export const RevisionModule: React.FC = () => {
                       )}
                   </div>
 
-                  <div className="mt-4">
-                        <label className="block text-sm font-bold text-gray-700 mb-1">Responsável pela Revisão <span className="text-red-500">*</span></label>
-                        <input 
-                            className="w-full border rounded p-3"
-                            placeholder="Nome do revisor"
-                            value={inspectorName} 
-                            onChange={e => setInspectorName(e.target.value)}
-                        />
+                  <div className="mt-6 border-t pt-4">
+                        <h4 className="font-bold text-gray-700 mb-3 flex items-center gap-2">
+                            <User size={18}/> Quem realizou o serviço?
+                        </h4>
+                        
+                        {/* 2. PARTNER SELECTION LOGIC */}
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">
+                                    Prestador do Serviço <span className="text-red-500">*</span>
+                                </label>
+                                <div className="flex gap-2">
+                                    <select 
+                                        disabled={isInternalRevision}
+                                        className={`flex-1 border rounded p-2 bg-white ${isInternalRevision ? 'bg-gray-100 text-gray-400' : ''}`}
+                                        value={revisionPartner}
+                                        onChange={e => setRevisionPartner(e.target.value)}
+                                    >
+                                        <option value="">Selecione...</option>
+                                        {partners.filter((p: any) => p.type === 'Revisão' || p.type === 'Outro' || p.type === 'Facção').map((p: any) => (
+                                            <option key={p.id} value={p.name}>{p.name}</option>
+                                        ))}
+                                    </select>
+                                    <div className="flex items-center gap-2 border px-3 rounded bg-gray-50">
+                                        <input 
+                                            type="checkbox" 
+                                            id="chkInternalRevision" 
+                                            checked={isInternalRevision} 
+                                            onChange={e => { 
+                                                setIsInternalRevision(e.target.checked); 
+                                                if(e.target.checked) setRevisionPartner(''); 
+                                            }} 
+                                        />
+                                        <label htmlFor="chkInternalRevision" className="text-sm font-bold text-gray-700 cursor-pointer">
+                                            Interno
+                                        </label>
+                                    </div>
+                                </div>
+                                {!isInternalRevision && (
+                                    <p className="text-xs text-green-600 mt-1 flex items-center gap-1">
+                                        <Wallet size={12}/> Irá gerar pagamento automático no financeiro.
+                                    </p>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Responsável (Conferente) <span className="text-red-500">*</span></label>
+                                <input 
+                                    className="w-full border rounded p-2"
+                                    placeholder="Quem conferiu o lote?"
+                                    value={inspectorName} 
+                                    onChange={e => setInspectorName(e.target.value)}
+                                />
+                            </div>
+                        </div>
                   </div>
                </div>
 

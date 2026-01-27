@@ -1,5 +1,4 @@
 
-// ... (imports remain the same)
 import { supabase } from './supabase';
 import {
   Product, ProductionOrder, Partner, Material, StandardOperation,
@@ -10,7 +9,7 @@ import {
   ProductionOrderItem, MaterialVariant, ConsolidatedRequirement, OrganizationConfig
 } from '../types';
 
-// ... (helper functions getOrgId, getCurrentUserName, mapOpFromDB, mapOsfFromDB remain the same)
+// ... (helper functions getOrgId, getCurrentUserName remain unchanged)
 const getOrgId = async () => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Sessão expirada. Recarregue a página.');
@@ -49,9 +48,15 @@ function mapOpFromDB(data: any): ProductionOrder {
         cuttingDetails: data.cutting_details,
         revisionDetails: data.revision_details,
         packingDetails: data.packing_details,
-        originalItems: data.original_items,
+        originalItems: data.original_items || [], // Garante array vazio se nulo
         phaseDates: data.phase_dates,
-        subcontractor: data.subcontractor
+        subcontractor: data.subcontractor,
+        // Novos campos mapeados do banco (snake_case) para o frontend (camelCase)
+        selectedFabricId: data.selected_fabric_id || '', 
+        fabricPurchasedTotal: Number(data.fabric_purchased_total) || 0,
+        fabricPurchasedBreakdown: data.fabric_purchased_breakdown || {},
+        plannedMarkerWidth: Number(data.planned_marker_width) || 0,
+        plannedMarkerLength: Number(data.planned_marker_length) || 0
     };
 }
 
@@ -60,16 +65,18 @@ function mapOsfFromDB(data: any): SubcontractorOrder {
     return {
         id: data.id,
         opId: data.op_id,
-        subcontractorName: data.subcontractor_name,
+        subcontractorName: data.subcontractor_name || data.partner_name, // Fallback para partner_name antigo
         type: data.type,
         sentDate: data.sent_date,
-        sentQuantity: data.sent_quantity,
-        receivedQuantity: data.received_quantity,
-        defectiveQuantity: data.defective_quantity || 0,
+        // CORREÇÃO CRÍTICA: Mapear quantity_sent (banco) para sentQuantity (frontend)
+        sentQuantity: data.quantity_sent !== undefined ? data.quantity_sent : data.sent_quantity, 
+        receivedQuantity: data.quantity_received !== undefined ? data.quantity_received : data.received_quantity,
+        defectiveQuantity: data.quantity_defect !== undefined ? data.quantity_defect : (data.defective_quantity || 0),
+        
         status: data.status,
         itemsSnapshot: data.items_snapshot,
         materialsSnapshot: data.materials_snapshot,
-        itemsReturned: data.items_returned,
+        itemsReturned: data.items_returned || [], // Garante array
         returnDate: data.return_date,
         conferente: data.conferente,
         observations: data.observations
@@ -77,7 +84,6 @@ function mapOsfFromDB(data: any): SubcontractorOrder {
 }
 
 export const ApiService = {
-  // ... (getOrganizationConfig, saveOrganizationConfig, Production Orders methods remain the same)
   getOrganizationConfig: async (): Promise<OrganizationConfig | null> => {
       const orgId = await getOrgId();
       const { data, error } = await supabase.from('organization_configs').select('*').eq('organization_id', orgId).single();
@@ -89,7 +95,11 @@ export const ApiService = {
           enableNotifications: data.enable_notifications,
           daysToAlertOverdue: data.days_to_alert_overdue,
           defaultPaymentTerms: data.default_payment_terms,
-          invoiceFooterText: data.invoice_footer_text
+          invoiceFooterText: data.invoice_footer_text,
+          leadTimeCutting: data.lead_time_cutting,
+          leadTimeSewing: data.lead_time_sewing,
+          leadTimeRevision: data.lead_time_revision,
+          leadTimePacking: data.lead_time_packing
       };
   },
 
@@ -103,6 +113,10 @@ export const ApiService = {
           days_to_alert_overdue: config.daysToAlertOverdue,
           default_payment_terms: config.defaultPaymentTerms,
           invoice_footer_text: config.invoiceFooterText,
+          lead_time_cutting: config.leadTimeCutting,
+          lead_time_sewing: config.leadTimeSewing,
+          lead_time_revision: config.leadTimeRevision,
+          lead_time_packing: config.leadTimePacking,
           updated_at: new Date().toISOString()
       };
       const { error } = await supabase.from('organization_configs').upsert(payload);
@@ -125,22 +139,33 @@ export const ApiService = {
 
   createProductionOrder: async (opData: any) => {
       const orgId = await getOrgId();
+      
+      // Tratamento para UUID vazio
+      const fabricId = opData.selectedFabricId && opData.selectedFabricId.trim() !== '' ? opData.selectedFabricId : null;
+
       const payload = {
-          lot_number: opData.lotNumber,
-          product_id: opData.productId,
-          tech_pack_version: opData.techPackVersion,
-          quantity_total: opData.quantityTotal,
+          lot_number: opData.lot_number,
+          product_id: opData.product_id,
+          tech_pack_version: opData.tech_pack_version,
+          quantity_total: opData.quantity_total,
           items: opData.items,
+          original_items: opData.original_items || [], // Mapeamento correto na criação
           status: opData.status,
-          start_date: opData.startDate,
-          due_date: opData.dueDate,
-          phase_dates: opData.phaseDates,
+          start_date: opData.start_date,
+          due_date: opData.due_date,
+          phase_dates: opData.phase_dates,
           subcontractor: opData.subcontractor,
-          cutting_details: opData.cuttingDetails,
-          cost_snapshot: opData.costSnapshot,
+          cutting_details: opData.cutting_details,
+          cost_snapshot: opData.cost_snapshot,
           organization_id: orgId,
           created_at: new Date().toISOString(),
-          events: opData.events || []
+          events: opData.events || [],
+          // Novos Campos
+          selected_fabric_id: fabricId,
+          fabric_purchased_total: opData.fabric_purchased_total || 0,
+          fabric_purchased_breakdown: opData.fabric_purchased_breakdown || {},
+          planned_marker_width: opData.planned_marker_width || 0,
+          planned_marker_length: opData.planned_marker_length || 0
       };
       
       const { data, error } = await supabase.from('production_orders').insert([payload]).select().single();
@@ -159,9 +184,27 @@ export const ApiService = {
       if (data.packingDetails) payload.packing_details = data.packingDetails;
       if (data.events) payload.events = data.events;
       if (data.subcontractor) payload.subcontractor = data.subcontractor;
+      
+      // CORREÇÃO: Mapeamento explícito para salvar o snapshot da grade original
       if (data.originalItems) payload.original_items = data.originalItems;
+      
+      // Novos Campos para atualização
+      if (data.selectedFabricId !== undefined) {
+          payload.selected_fabric_id = data.selectedFabricId && data.selectedFabricId.trim() !== '' ? data.selectedFabricId : null;
+      }
+      if (data.fabricPurchasedTotal !== undefined) payload.fabric_purchased_total = data.fabricPurchasedTotal;
+      if (data.fabricPurchasedBreakdown !== undefined) payload.fabric_purchased_breakdown = data.fabricPurchasedBreakdown;
+      if (data.plannedMarkerWidth !== undefined) payload.planned_marker_width = data.plannedMarkerWidth;
+      if (data.plannedMarkerLength !== undefined) payload.planned_marker_length = data.plannedMarkerLength;
 
       const { error } = await supabase.from('production_orders').update(payload).eq('id', id).eq('organization_id', orgId);
+      if (error) throw error;
+      return true;
+  },
+
+  deleteProductionOrder: async (id: string) => {
+      const orgId = await getOrgId();
+      const { error } = await supabase.from('production_orders').delete().eq('id', id).eq('organization_id', orgId);
       if (error) throw error;
       return true;
   },
@@ -177,9 +220,11 @@ export const ApiService = {
       const payload = {
           op_id: data.opId,
           partner_id: data.partnerId,
-          subcontractor_name: data.subcontractorName,
+          subcontractor_name: data.subcontractorName || data.partnerName,
+          partner_name: data.subcontractorName || data.partnerName, // Garante compatibilidade
           type: data.type,
-          sent_quantity: data.sentQuantity,
+          // CORREÇÃO: Salvar nos campos corretos do banco
+          quantity_sent: data.sentQuantity, 
           items_snapshot: data.itemsSnapshot,
           materials_snapshot: data.materialsSnapshot,
           observations: data.observations,
@@ -193,23 +238,172 @@ export const ApiService = {
   },
 
   cancelSubcontractorShipment: async (osfId: string) => {
-      const { error } = await supabase.from('subcontractor_orders').delete().eq('id', osfId);
+      const orgId = await getOrgId();
+      // Permite cancelar (excluir) se estiver apenas Enviado
+      const { error } = await supabase.from('subcontractor_orders').delete().eq('id', osfId).eq('organization_id', orgId);
       if (error) throw error;
       return true;
   },
 
-  registerReturn: async (osfId: string, items: ReturnItem[], conferente: string) => {
-      const receivedQty = items.reduce((a, b) => a + b.quantity, 0);
-      const defectiveQty = items.filter(i => i.type === 'defect').reduce((a, b) => a + b.quantity, 0);
-      const { error } = await supabase.from('subcontractor_orders').update({
-          received_quantity: receivedQty,
-          defective_quantity: defectiveQty,
-          items_returned: items,
-          return_date: new Date().toISOString(),
+  registerReturn: async (osfId: string, currentBatchItems: ReturnItem[], conferente: string) => {
+      // 1. Busca a OSF para obter estado atual
+      const { data: osfData, error: fetchError } = await supabase
+          .from('subcontractor_orders')
+          .select('*')
+          .eq('id', osfId)
+          .single();
+      
+      if (fetchError) throw fetchError;
+      
+      const osf = mapOsfFromDB(osfData);
+
+      // 2. Calcula Quantidades Acumuladas
+      // Soma o que já foi recebido antes (armazenado no banco) com o lote atual (input do usuário)
+      const previousReceivedTotal = osf.receivedQuantity || 0;
+      const currentBatchTotal = currentBatchItems.reduce((a, b) => a + b.quantity, 0);
+      const newTotalReceived = previousReceivedTotal + currentBatchTotal;
+      
+      // Defeitos também acumulam
+      const previousDefectTotal = osf.defectiveQuantity || 0;
+      const currentBatchDefect = currentBatchItems.filter(i => i.type === 'defect').reduce((a, b) => a + b.quantity, 0);
+      const newTotalDefect = previousDefectTotal + currentBatchDefect;
+
+      // 3. Atualiza a Grade Acumulada (items_returned)
+      // Mescla o array antigo com o novo para manter o histórico por tamanho/cor
+      const previousItems = osf.itemsReturned || [];
+      const newCumulativeItems = [...previousItems];
+
+      currentBatchItems.forEach(newItem => {
+          const existingIndex = newCumulativeItems.findIndex(
+              prev => prev.color === newItem.color && prev.size === newItem.size
+          );
+
+          if (existingIndex >= 0) {
+              // Se já existe, soma
+              newCumulativeItems[existingIndex] = {
+                  ...newCumulativeItems[existingIndex],
+                  quantity: newCumulativeItems[existingIndex].quantity + newItem.quantity
+              };
+          } else {
+              // Se novo, adiciona
+              newCumulativeItems.push(newItem);
+          }
+      });
+
+      // 4. Determina o Status (Parcial vs Concluído)
+      const totalSent = osf.sentQuantity || 0;
+      // Se recebeu tudo (ou mais), está concluído
+      const isCompleted = newTotalReceived >= totalSent;
+      const newStatus = isCompleted ? 'Concluido' : 'Parcial';
+
+      // 5. Histórico de Logs (Append)
+      const newHistoryEntry = {
+          date: new Date().toISOString(),
           conferente: conferente,
-          status: 'Concluido'
+          items: currentBatchItems,
+          total: currentBatchTotal
+      };
+      const returnHistory = (osfData.return_history || []);
+      returnHistory.push(newHistoryEntry);
+
+      // 6. Atualiza a OSF no Banco
+      const { error: updateError } = await supabase.from('subcontractor_orders').update({
+          quantity_received: newTotalReceived,
+          quantity_defect: newTotalDefect,
+          items_returned: newCumulativeItems, // Salva o acumulado para a UI bloquear corretamente
+          return_history: returnHistory,
+          return_date: new Date().toISOString(), // Data do último recebimento
+          conferente: conferente,
+          status: newStatus
       }).eq('id', osfId);
-      if (error) throw error;
+      
+      if (updateError) throw updateError;
+
+      // 7. NEW: LOGAR NA OP (Ficha de Produção) COM NOME DO CONFERENTE E DETALHES
+      if (osf.opId) {
+          const { data: opData } = await supabase.from('production_orders').select('events').eq('id', osf.opId).single();
+          const currentEvents = opData?.events || [];
+          
+          const newEvent = {
+              date: new Date().toISOString(),
+              user: conferente || 'Sistema',
+              action: 'Recebimento Facção',
+              description: `Recebido: ${currentBatchTotal} pçs | Defeitos: ${currentBatchDefect} pçs | Conferente: ${conferente} | Status: ${newStatus}`,
+              type: 'info'
+          };
+
+          const updates: any = { events: [...currentEvents, newEvent] };
+
+          // Lógica de Mudança de Status da OP
+          // Se for Parcial, NÃO muda a OP (continua "Em Costura").
+          // Se for Concluído, move a OP para "Revisão".
+          if (isCompleted) {
+              updates.status = 'Revisão'; // OrderStatus.QUALITY_CONTROL
+          }
+
+          await supabase.from('production_orders').update(updates).eq('id', osf.opId);
+      }
+
+      return true;
+  },
+
+  revertSubcontractorReceipt: async (osfId: string) => {
+      // 1. Busca a OSF para saber qual é a OP
+      const { data: osf, error: fetchError } = await supabase
+          .from('subcontractor_orders')
+          .select('op_id')
+          .eq('id', osfId)
+          .single();
+      
+      if (fetchError) throw fetchError;
+
+      // 2. CHECKPOINT 3: VERIFICAR SE JÁ EXISTE REVISÃO
+      // Se a OP já foi conferida (aprovada/rejeitada) no módulo de Revisão, não podemos estornar a facção
+      // pois isso quebraria a integridade do estoque e dos dados.
+      if (osf && osf.op_id) {
+          const { data: op } = await supabase
+              .from('production_orders')
+              .select('status, revision_details')
+              .eq('id', osf.op_id)
+              .single();
+          
+          if (op) {
+              // Verifica se avançou de fase
+              if (op.status === 'Embalagem' || op.status === 'Concluído') {
+                  throw new Error("Não é possível estornar: A OP já avançou para Embalagem/Finalização.");
+              }
+
+              // Verifica se tem apontamentos na revisão (JSONB)
+              const approved = Number(op.revisionDetails?.approvedQty) || 0;
+              const rejected = Number(op.revisionDetails?.rejectedQty) || 0;
+              const rework = Number(op.revisionDetails?.reworkQty) || 0;
+
+              if (approved > 0 || rejected > 0 || rework > 0) {
+                  throw new Error("Não é possível estornar: Já existem peças conferidas no módulo de Revisão. Estorne a revisão primeiro.");
+              }
+          }
+      }
+
+      // 3. Reseta a OSF para 'Enviado' (Limpa tudo para recomeçar)
+      const { error: updateError } = await supabase.from('subcontractor_orders').update({
+          quantity_received: 0,
+          quantity_defect: 0,
+          items_returned: [], // Limpa grade
+          return_history: [], // Limpa histórico
+          return_date: null,
+          conferente: null,
+          status: 'Enviado'
+      }).eq('id', osfId);
+
+      if (updateError) throw updateError;
+
+      // 4. Retorna a OP para 'Em Costura (Facção)'
+      if (osf && osf.op_id) {
+          await supabase.from('production_orders').update({
+              status: 'Em Costura (Facção)' // OrderStatus.SEWING
+          }).eq('id', osf.op_id);
+      }
+
       return true;
   },
 
@@ -218,8 +412,9 @@ export const ApiService = {
       const payload = {
           op_id: opId,
           subcontractor_name: subcontractor,
+          partner_name: subcontractor,
           type: 'Retrabalho',
-          sent_quantity: quantity,
+          quantity_sent: quantity, // CORREÇÃO
           items_snapshot: items,
           observations: description,
           status: 'Enviado',
@@ -233,6 +428,7 @@ export const ApiService = {
 
   getFinishedGoods: async () => { 
       await getOrgId(); 
+      // Busca todas as entradas de produtos acabados (vindas da Embalagem)
       const { data } = await supabase.from('finished_goods').select('*'); 
       return (data || []).map((item: any) => ({
           ...item,
@@ -240,6 +436,32 @@ export const ApiService = {
           opLotNumber: item.op_lot_number,
           productId: item.product_id
       })); 
+  },
+
+  // NEW: Busca as saídas/exportações
+  getInventoryExports: async () => {
+      await getOrgId();
+      const { data } = await supabase.from('inventory_exports').select('*');
+      return data || [];
+  },
+
+  // NEW: Cria registros de saída
+  createInventoryExport: async (items: any[]) => {
+      const orgId = await getOrgId();
+      const payloads = items.map(item => ({
+          organization_id: orgId,
+          product_id: item.productId,
+          color: item.color,
+          size: item.size,
+          quantity: item.quantity,
+          destination: item.destination,
+          responsible: item.responsible,
+          created_at: new Date().toISOString()
+      }));
+      
+      const { error } = await supabase.from('inventory_exports').insert(payloads);
+      if (error) throw error;
+      return true;
   },
 
   revertStockToPacking: async (stockId: string) => {
@@ -272,7 +494,7 @@ export const ApiService = {
       }));
   },
 
-  // --- Products & Tech Packs (CRITICAL UPDATE FOR VERSION SORTING) ---
+  // --- Products & Tech Packs ---
   getProducts: async () => { 
       await getOrgId(); 
       const { data } = await supabase.from('products').select('*, tech_packs(*)'); 
@@ -298,9 +520,28 @@ export const ApiService = {
                 isFrozen: tp.is_frozen,
                 createdAt: tp.created_at
             }))
-            // IMPORTANT: Sort Descending by Version to ensure latest is always first
             .sort((a: any, b: any) => b.version - a.version)
       })); 
+  },
+
+  getProductsLite: async () => {
+      await getOrgId();
+      const { data } = await supabase
+          .from('products')
+          .select('id, sku, name, collection, image_url, sizes, colors, status, tech_packs(id, version, status, is_frozen, active_sizes, total_cost)');
+      
+      return (data || []).map((p: any) => ({
+          ...p,
+          imageUrl: p.image_url,
+          techPacks: (p.tech_packs || []).map((tp: any) => ({
+              id: tp.id,
+              version: tp.version,
+              status: tp.status,
+              isFrozen: tp.is_frozen,
+              activeSizes: tp.active_sizes,
+              totalCost: tp.total_cost
+          })).sort((a: any, b: any) => b.version - a.version)
+      }));
   },
 
   saveProduct: async (product: Partial<Product>) => {
@@ -329,6 +570,16 @@ export const ApiService = {
 
   deleteProduct: async (id: string) => {
     await getOrgId();
+    const { count } = await supabase
+        .from('production_orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('product_id', id)
+        .neq('status', 'Concluído')
+        .neq('status', 'Cancelado');
+
+    if (count !== null && count > 0) {
+        throw new Error(`Não é possível excluir este produto pois existem ${count} ordens de produção ativas vinculadas a ele. Desative o produto em vez de excluir.`);
+    }
     const { error } = await supabase.from('products').delete().eq('id', id);
     if (error) throw error;
     return true;
@@ -378,25 +629,27 @@ export const ApiService = {
         .maybeSingle();
 
     if (existingTP) {
-        const { error } = await supabase
-            .from('tech_packs')
-            .update(payload)
-            .eq('id', existingTP.id);
+        const { error } = await supabase.from('tech_packs').update(payload).eq('id', existingTP.id);
         if (error) throw new Error(`Erro ao atualizar Ficha: ${error.message}`);
         return existingTP.id;
     } else {
-        const { data, error } = await supabase
-            .from('tech_packs')
-            .insert([{ ...payload, created_at: new Date().toISOString() }])
-            .select('id')
-            .single();
+        const { data, error } = await supabase.from('tech_packs').insert([{ ...payload, created_at: new Date().toISOString() }]).select('id').single();
         if (error) throw new Error(`Erro ao criar Ficha: ${error.message}`);
         return data.id;
     }
   },
 
-  // ... (Other Master Data methods remain the same)
-  getMaterials: async () => { await getOrgId(); const { data } = await supabase.from('materials').select('*'); return (data || []).map((m: any) => ({ ...m, costUnit: m.cost_unit, currentStock: m.current_stock, hasColors: m.has_colors })); },
+  getMaterials: async () => { 
+      await getOrgId(); 
+      const { data } = await supabase.from('materials').select('*'); 
+      return (data || []).map((m: any) => ({ 
+          ...m, 
+          costUnit: m.cost_unit, 
+          currentStock: m.current_stock, 
+          hasColors: m.has_colors, 
+          usageStage: m.usage_stage // Garante leitura
+      })); 
+  },
   
   saveMaterial: async (material: Partial<Material>) => {
     const orgId = await getOrgId();
@@ -404,6 +657,7 @@ export const ApiService = {
         name: material.name, code: material.code, type: material.type, unit: material.unit,
         cost_unit: material.costUnit, current_stock: material.currentStock, supplier: material.supplier,
         status: material.status, has_colors: material.hasColors, variants: material.variants, properties: material.properties,
+        usage_stage: material.usageStage, // Garante gravação
         organization_id: orgId 
     };
     if (material.id && material.id.length === 36) await supabase.from('materials').update(payload).eq('id', material.id);
@@ -442,7 +696,8 @@ export const ApiService = {
           quantityDelivered: p.quantity_delivered,
           ratePerPiece: p.rate_per_piece,
           bankAccountName: p.bank_account_name,
-          date: p.date || p.created_at
+          date: p.date || p.created_at,
+          dueDate: p.due_date // Map database column due_date to dueDate
       })); 
   },
 

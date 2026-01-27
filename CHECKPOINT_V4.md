@@ -20,6 +20,7 @@ Todos os módulos listados abaixo são considerados **NUCLEAR CORE** e não deve
 
 ### 2. Ciclo Industrial (FROZEN)
 *   **Ficha Técnica:** `components/TechPackModule.tsx`
+    *   **STATUS:** 🛑 **TOTALMENTE CONGELADO (FROZEN)**. Este é o coração do sistema. Nenhuma alteração é permitida.
 *   **Ordens de Produção:** `components/ProductionOrderList.tsx`, `components/ProductionWizard.tsx`
 *   **Sala de Corte:** `components/CuttingModule.tsx`
 *   **Facções (OSF):** `components/SubcontractorModule.tsx`

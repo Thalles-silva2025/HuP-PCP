@@ -19,8 +19,11 @@ import { supabase } from '../services/supabase'; // Acesso direto para Pagamento
 import { 
   Scissors, Layers, CheckCircle2, AlertTriangle, PlayCircle, 
   PauseCircle, Ruler, Scale, Box, User, Save, X, 
-  MoreVertical, Clock, DollarSign, ArrowRight, FileText, Grid3X3, PlusCircle
+  MoreVertical, Clock, DollarSign, ArrowRight, FileText, Grid3X3, PlusCircle, Trash2
 } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
+import { useDialog } from '../contexts/DialogContext'; // IMPORT DIALOG
+import { useQuery } from '@tanstack/react-query'; // IMPORT PERFORMANCE TOOL
 
 // --- HELPERS ---
 const getColorStyle = (colorName: string) => {
@@ -56,11 +59,35 @@ const sortSizes = (a: string, b: string) => {
 type TabType = 'planned' | 'active' | 'completed';
 
 export const CuttingModule: React.FC = () => {
+  const { addToast } = useToast();
+  const dialog = useDialog();
   const [activeTab, setActiveTab] = useState<TabType>('planned');
-  const [ops, setOps] = useState<ProductionOrder[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [partners, setPartners] = useState<Partner[]>([]);
-  const [loading, setLoading] = useState(false);
+  
+  // --- PERFORMANCE UPGRADE: REACT QUERY ---
+  // Substitui os states manuais por queries cacheadas
+  
+  const { data: allOps = [], isLoading: loadingOps } = useQuery({
+      queryKey: ['productionOrders'],
+      queryFn: ApiService.getProductionOrders,
+      staleTime: 1000 * 60 * 2 // Cache de 2 minutos para OPs
+  });
+
+  const { data: products = [] } = useQuery({
+      queryKey: ['products'],
+      queryFn: ApiService.getProducts,
+      staleTime: 1000 * 60 * 5 // Cache de 5 minutos para Produtos
+  });
+
+  const { data: partners = [] } = useQuery({
+      queryKey: ['partners'],
+      queryFn: ApiService.getPartners,
+      staleTime: 1000 * 60 * 10 // Cache de 10 minutos para Parceiros
+  });
+
+  // Filtragem de dados em memória (Instantâneo)
+  const ops = useMemo(() => {
+      return allOps.filter(o => o.status !== OrderStatus.DRAFT && o.status !== OrderStatus.CANCELLED);
+  }, [allOps]);
 
   // Modal & Processing State
   const [selectedOp, setSelectedOp] = useState<ProductionOrder | null>(null);
@@ -82,32 +109,6 @@ export const CuttingModule: React.FC = () => {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authName, setAuthName] = useState('');
   const [overproductionDetails, setOverproductionDetails] = useState<any>(null);
-
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
-    setLoading(true);
-    try {
-        const [allOps, allProds, allPartners] = await Promise.all([
-            ApiService.getProductionOrders(),
-            ApiService.getProducts(),
-            ApiService.getPartners()
-        ]);
-        
-        // Filter only valid OPs for cutting logic (Remove Drafts/Cancelled)
-        const validOps = allOps.filter(o => o.status !== OrderStatus.DRAFT && o.status !== OrderStatus.CANCELLED);
-        
-        setOps(validOps);
-        setProducts(allProds);
-        setPartners(allPartners);
-    } catch (error) {
-        console.error("Erro ao carregar dados da Sala de Corte:", error);
-    } finally {
-        setLoading(false);
-    }
-  };
 
   // --- LOGIC: STATUS FILTERING ---
   const filteredOps = useMemo(() => {
@@ -195,13 +196,127 @@ export const CuttingModule: React.FC = () => {
       setAuthName('');
   };
 
+  const handleRevertCut = async (job: CuttingJob) => {
+      if (!selectedOp) return;
+      
+      // CONFIRMAÇÃO DO USUÁRIO
+      const confirmed = await dialog.confirm({
+          title: 'Estornar Corte?',
+          message: `Deseja excluir o corte #${job.tacoNumber} (${job.totalPieces} pçs)?\n\nIsso recalculará a grade. Se for o último corte, a OP voltará para 'Planejado'.`,
+          type: 'danger',
+          confirmText: 'Sim, Estornar',
+          cancelText: 'Cancelar'
+      });
+
+      if (!confirmed) return;
+
+      setIsProcessing(true);
+      try {
+          // 1. Verificação de Segurança: Existe Remessa (OSF)?
+          const allOsfs = await ApiService.getSubcontractorOrders();
+          const hasRemessa = allOsfs.some(osf => osf.opId === selectedOp.id);
+
+          if (hasRemessa) {
+              addToast({ type: 'error', title: 'Ação Bloqueada', message: 'Já existe uma Remessa (OSF) gerada para esta OP. Cancele a remessa antes de estornar o corte.' });
+              setIsProcessing(false);
+              return;
+          }
+
+          // 2. Remove o Job da lista
+          const updatedJobs = (selectedOp.cuttingDetails?.jobs || []).filter(j => j.id !== job.id);
+          
+          // Preparar payload de atualização
+          const updates: Partial<ProductionOrder> = {
+              cuttingDetails: {
+                  ...selectedOp.cuttingDetails!,
+                  jobs: updatedJobs
+              }
+          };
+
+          // 3. Regra de Volta para Planejado (Se não sobrar nenhum corte)
+          if (updatedJobs.length === 0) {
+              updates.status = OrderStatus.PLANNED;
+              
+              // Restaura grade original se existir (desfazendo overproduction)
+              if (selectedOp.originalItems && selectedOp.originalItems.length > 0) {
+                  updates.items = selectedOp.originalItems;
+                  updates.quantityTotal = selectedOp.originalItems.reduce((a, b) => a + b.quantity, 0);
+              }
+
+              // Log de Evento
+              updates.events = [
+                  ...(selectedOp.events || []),
+                  {
+                      date: new Date().toISOString(),
+                      user: 'Sistema',
+                      action: 'Estorno Total',
+                      description: 'Todos os cortes estornados. OP revertida para Planejado e grade restaurada.',
+                      type: 'alert'
+                  }
+              ];
+          } else {
+              // 4. Regra de Recálculo Parcial (Se sobraram cortes)
+              // Precisamos recalcular a grade "items" e o "quantityTotal" baseado APENAS nos cortes restantes
+              
+              const accumulatedItems: Record<string, number> = {};
+              let newTotalQty = 0;
+
+              updatedJobs.forEach(j => {
+                  newTotalQty += j.totalPieces;
+                  const matrix = j.matrix;
+                  j.layers.forEach(layer => {
+                      if (layer.layers > 0) {
+                          matrix.forEach(ratio => {
+                              if (ratio.ratio > 0) {
+                                  const key = `${layer.color}###${ratio.size}`;
+                                  accumulatedItems[key] = (accumulatedItems[key] || 0) + (layer.layers * ratio.ratio);
+                              }
+                          });
+                      }
+                  });
+              });
+
+              // Atualiza items e total
+              updates.quantityTotal = newTotalQty;
+              updates.items = Object.entries(accumulatedItems).map(([key, qty]) => {
+                  const [color, size] = key.split('###');
+                  return { color, size, quantity: qty };
+              });
+
+              // Log de Evento Parcial
+              updates.events = [
+                  ...(selectedOp.events || []),
+                  {
+                      date: new Date().toISOString(),
+                      user: 'Sistema',
+                      action: 'Estorno Parcial',
+                      description: `Corte de ${job.totalPieces} pçs estornado. Grade recalculada.`,
+                      type: 'info'
+                  }
+              ];
+          }
+
+          await ApiService.updateProductionOrder(selectedOp.id, updates);
+          
+          addToast({ type: 'success', title: 'Sucesso', message: 'Corte estornado e totais atualizados.' });
+          
+          // Refresh (Automático pelo React Query se invalidado, ou setSelectedOp null força re-seleção)
+          setSelectedOp(null);
+
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      } finally {
+          setIsProcessing(false);
+      }
+  };
+
   const validateAndCut = async (authorized = false) => {
       if (!selectedOp || !selectedOp.cuttingDetails) return;
       
       const { total, rows } = calculatedPreview;
       
       if (total <= 0) {
-          alert('Informe a quantidade de folhas em pelo menos uma cor.');
+          addToast({ type: 'warning', title: 'Atenção', message: 'Informe a quantidade de folhas em pelo menos uma cor.' });
           return;
       }
 
@@ -221,7 +336,7 @@ export const CuttingModule: React.FC = () => {
       }
 
       if (authorized && !authName.trim()) {
-          alert('Informe o nome do responsável pela autorização.');
+          addToast({ type: 'error', title: 'Erro', message: 'Informe o nome do responsável pela autorização.' });
           return;
       }
 
@@ -344,13 +459,12 @@ export const CuttingModule: React.FC = () => {
           // 5. Save to DB using ApiService
           await ApiService.updateProductionOrder(selectedOp.id, updates);
           
-          await loadData();
           setShowAuthModal(false);
           setSelectedOp(null);
-          alert('Corte registrado com sucesso! Dados atualizados no banco.');
+          addToast({ type: 'success', title: 'Corte Registrado', message: 'Dados de enfesto atualizados.' });
 
       } catch (err: any) {
-          alert('Erro ao salvar: ' + err.message);
+          addToast({ type: 'error', title: 'Erro ao Salvar', message: err.message });
       } finally {
           setIsProcessing(false);
       }
@@ -474,7 +588,7 @@ export const CuttingModule: React.FC = () => {
         </div>
 
         {/* CONTENT GRID */}
-        {loading ? (
+        {loadingOps ? (
             <div className="text-center py-20 text-gray-400">Carregando ordens do banco de dados...</div>
         ) : filteredOps.length === 0 ? (
             <div className="text-center py-20 bg-gray-50 rounded-xl border border-dashed border-gray-300">
@@ -502,7 +616,7 @@ export const CuttingModule: React.FC = () => {
                             <div className="h-8 w-px bg-slate-700"></div>
                             <div>
                                 <div className="text-xs font-bold text-slate-400 uppercase tracking-wider">Produto</div>
-                                <div className="font-bold">{products.find(p => p.id === selectedOp.productId)?.name}</div>
+                                <div className="font-bold">{products.find(p => p.id === selectedOp.productId)?.name || 'Carregando...'}</div>
                             </div>
                         </div>
                         <button onClick={() => setSelectedOp(null)} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white">
@@ -537,13 +651,25 @@ export const CuttingModule: React.FC = () => {
                                         // Calculate global index (reverse index to normal 1..N)
                                         const realIndex = arr.length - idx;
                                         return (
-                                            <div key={idx} className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm relative pl-4 overflow-hidden group hover:border-orange-300 transition-colors">
+                                            <div key={job.id || idx} className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm relative pl-4 overflow-hidden group hover:border-orange-300 transition-colors">
                                                 <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500"></div>
                                                 <div className="flex justify-between items-center mb-1">
                                                     <span className="font-bold text-gray-800 text-sm flex items-center gap-2">
                                                         <Scissors size={12}/> Corte #{realIndex}
                                                     </span>
-                                                    <span className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded font-bold">{job.totalPieces} pçs</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded font-bold">{job.totalPieces} pçs</span>
+                                                        <button 
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleRevertCut(job);
+                                                            }} 
+                                                            className="ml-2 p-1.5 bg-white border border-red-200 text-red-500 rounded hover:bg-red-50 hover:border-red-300 transition-colors shadow-sm cursor-pointer z-20"
+                                                            title="Estornar este corte (Apagar)"
+                                                        >
+                                                            <Trash2 size={14} className="stroke-red-600"/>
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 <div className="text-xs text-gray-500 flex justify-between mt-2">
                                                     <span>{new Date(job.date).toLocaleDateString()}</span>

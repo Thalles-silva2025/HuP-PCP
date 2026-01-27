@@ -11,22 +11,11 @@
 
 // ... existing imports ...
 import React, { useState, useEffect, useMemo } from 'react';
-import { Product, TechPack, CuttingDetails, MatrixRatio, LayerDefinition, OrderStatus, Partner, ProductionOrder, PhaseDates } from '../types';
-import { MockService } from '../services/mockDb';
+import { Product, TechPack, CuttingDetails, MatrixRatio, LayerDefinition, OrderStatus, Partner, ProductionOrder, PhaseDates, Color, Material } from '../types'; // Added Material
 import { ApiService } from '../services/api';
-import { ChevronRight, Check, AlertTriangle, ArrowLeft, Grid3X3, Layers, Plus, Calendar, User, Scissors, Info, Trash2, Printer, Save, Copy, FileText, Truck, ClipboardCheck, Package, AlertCircle, Loader2 } from 'lucide-react';
+import { ChevronRight, Check, AlertTriangle, ArrowLeft, Grid3X3, Layers, Plus, Calendar, User, Scissors, Info, Trash2, Printer, Save, Copy, FileText, Truck, ClipboardCheck, Package, AlertCircle, Loader2, Ruler } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
-
-// ... (Helpers and Interface WizardModel unchanged) ...
-// Helper for Color
-const getColorStyle = (colorName: string) => {
-    const map: any = {
-        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
-        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
-        'Rosa': '#ffc0cb', 'Roxo': '#800080'
-    };
-    return map[colorName] || '#cccccc';
-};
+import { useToast } from '../contexts/ToastContext';
 
 // Interface for Internal Wizard State
 interface WizardModel {
@@ -40,9 +29,16 @@ interface WizardModel {
     cutter: string;
     subcontractor: string;
     totalPieces: number;
+    // NEW FIELDS
+    selectedFabricId?: string;
+    fabricPurchasedTotal?: number;
+    fabricPurchasedBreakdown?: Record<string, number>;
+    plannedMarkerWidth?: number;
+    plannedMarkerLength?: number;
 }
 
 export const ProductionWizard: React.FC = () => {
+  const { addToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const editBatch = (location.state as any)?.editBatch as ProductionOrder[]; // Receive batch for editing
@@ -51,6 +47,8 @@ export const ProductionWizard: React.FC = () => {
   const [step, setStep] = useState(1);
   const [products, setProducts] = useState<Product[]>([]);
   const [partners, setPartners] = useState<Partner[]>([]);
+  const [dbColors, setDbColors] = useState<Color[]>([]); 
+  const [materials, setMaterials] = useState<Material[]>([]); // New state for fabrics
   
   const [selectedModels, setSelectedModels] = useState<WizardModel[]>([]);
   const [activeModelTab, setActiveModelTab] = useState<string | null>(null);
@@ -72,19 +70,47 @@ export const ProductionWizard: React.FC = () => {
   
   // NEW: State to prevent double clicks
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Helper for Color Lookup
+  const resolveColorHex = (colorName: string) => {
+      const found = dbColors.find(c => c.name.toLowerCase() === colorName.toLowerCase());
+      if (found) return found.hex;
+      
+      // Fallback map for legacy/hardcoded
+      const map: any = {
+        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
+        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
+        'Rosa': '#ffc0cb', 'Roxo': '#800080'
+      };
+      return map[colorName] || '#cccccc';
+  };
 
   useEffect(() => {
     const load = async () => {
-        const [prods, ptrs] = await Promise.all([
-            ApiService.getProducts(),
-            ApiService.getPartners()
-        ]);
-        setProducts(prods);
-        setPartners(ptrs);
+        setIsLoading(true);
+        try {
+            // PERFORMANCE FIX: Use lightweight product fetch
+            const [prods, ptrs, colors, mats] = await Promise.all([
+                ApiService.getProductsLite(),
+                ApiService.getPartners(),
+                ApiService.getColors(),
+                ApiService.getMaterials() // Fetch materials
+            ]);
+            setProducts(prods as any); 
+            setPartners(ptrs);
+            setDbColors(colors);
+            setMaterials(mats);
 
-        // HYDRATION LOGIC (If Editing)
-        if (editBatch && editBatch.length > 0) {
-            hydrateWizard(editBatch, prods);
+            // HYDRATION LOGIC (If Editing)
+            if (editBatch && editBatch.length > 0) {
+                hydrateWizard(editBatch, prods as any);
+            }
+        } catch (e) {
+            console.error("Erro carregando wizard:", e);
+            addToast({ type: 'error', title: 'Erro', message: 'Falha ao carregar dados iniciais.' });
+        } finally {
+            setIsLoading(false);
         }
     };
     load();
@@ -127,7 +153,13 @@ export const ProductionWizard: React.FC = () => {
               layers,
               cutter: op.cuttingDetails?.cutterName || '',
               subcontractor: op.subcontractor || '',
-              totalPieces: op.quantityTotal
+              totalPieces: op.quantityTotal,
+              // Hydrate new fields
+              selectedFabricId: op.selectedFabricId,
+              fabricPurchasedTotal: op.fabricPurchasedTotal,
+              fabricPurchasedBreakdown: op.fabricPurchasedBreakdown,
+              plannedMarkerWidth: op.plannedMarkerWidth,
+              plannedMarkerLength: op.plannedMarkerLength
           });
       });
 
@@ -141,7 +173,7 @@ export const ProductionWizard: React.FC = () => {
       const latest = product.techPacks.find(tp => tp.status === 'aprovado') || product.techPacks[0];
       
       if (!latest) {
-          alert(`O produto ${product.name} não possui Ficha Técnica. Configure primeiro.`);
+          addToast({ type: 'warning', title: 'Atenção', message: `O produto ${product.name} não possui Ficha Técnica. Configure primeiro.` });
           return;
       }
 
@@ -150,15 +182,23 @@ export const ProductionWizard: React.FC = () => {
       const colorsToUse = product.colors; 
       const initialLayers = colorsToUse.map(c => ({ color: c, layers: 0 }));
 
+      // Attempt to sync shared fields from existing models if any
+      const existingModel = selectedModels[0];
       const newModel: WizardModel = {
           uid: `wm-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
           product,
           techPack: latest,
           matrix: initialMatrix,
           layers: initialLayers,
-          cutter: '',
-          subcontractor: '',
-          totalPieces: 0
+          cutter: existingModel?.cutter || '',
+          subcontractor: existingModel?.subcontractor || '',
+          totalPieces: 0,
+          fabricPurchasedBreakdown: {},
+          // Sync shared fabric data
+          selectedFabricId: existingModel?.selectedFabricId,
+          fabricPurchasedTotal: existingModel?.fabricPurchasedTotal,
+          plannedMarkerWidth: existingModel?.plannedMarkerWidth,
+          plannedMarkerLength: existingModel?.plannedMarkerLength
       };
 
       setSelectedModels([...selectedModels, newModel]);
@@ -192,29 +232,73 @@ export const ProductionWizard: React.FC = () => {
       }));
   };
 
+  // UPDATE FABRIC FUNCTIONS (UPDATED: SYNC ALL MODELS)
+  const updateModelFabric = (uid: string, field: string, value: any) => {
+      // Fields that are shared across the entire Batch/OP
+      const sharedFields = ['plannedMarkerWidth', 'plannedMarkerLength', 'selectedFabricId', 'fabricPurchasedTotal'];
+      
+      if (sharedFields.includes(field)) {
+          // Update ALL models because marker/fabric is unique for the batch
+          setSelectedModels(prev => prev.map(m => ({ ...m, [field]: value })));
+      } else {
+          // Standard update for individual fields (though breakdown might be individual depending on colors)
+          setSelectedModels(prev => prev.map(m => m.uid === uid ? { ...m, [field]: value } : m));
+      }
+  };
+
+  const updateFabricBreakdown = (uid: string, color: string, value: number) => {
+      setSelectedModels(prev => prev.map(m => {
+          if (m.uid !== uid) return m;
+          return {
+              ...m,
+              fabricPurchasedBreakdown: {
+                  ...(m.fabricPurchasedBreakdown || {}),
+                  [color]: value
+              }
+          };
+      }));
+  };
+
   const calculatePieces = (matrix: MatrixRatio[], layers: LayerDefinition[]) => {
       const ratioTotal = matrix.reduce((a,b)=>a+b.ratio,0);
       const layersTotal = layers.reduce((a,b)=>a+b.layers,0);
       return ratioTotal * layersTotal;
   };
 
-  const autoFillDates = () => {
+  const autoFillDates = async () => {
+      // 1. Fetch Config for Lead Times
+      const config = await ApiService.getOrganizationConfig();
+      const ltCut = config?.leadTimeCutting || 2;
+      const ltSew = config?.leadTimeSewing || 15;
+      const ltRev = config?.leadTimeRevision || 2;
+      const ltPack = config?.leadTimePacking || 1;
+
       const start = new Date(phaseDates.cuttingStart);
       const addDays = (d: Date, days: number) => {
           const res = new Date(d);
           res.setDate(res.getDate() + days);
           return res;
       };
+
+      const cutEnd = addDays(start, ltCut);
+      const sewStart = addDays(cutEnd, 1);
+      const sewEnd = addDays(sewStart, ltSew);
+      const revStart = addDays(sewEnd, 1);
+      const revEnd = addDays(revStart, ltRev);
+      const packStart = addDays(revEnd, 0); // Can start same day
+      const packEnd = addDays(packStart, ltPack);
+
       setPhaseDates({
           cuttingStart: start.toISOString().split('T')[0],
-          cuttingEnd: addDays(start, 2).toISOString().split('T')[0],
-          sewingStart: addDays(start, 3).toISOString().split('T')[0],
-          sewingEnd: addDays(start, 18).toISOString().split('T')[0],
-          revisionStart: addDays(start, 19).toISOString().split('T')[0],
-          revisionEnd: addDays(start, 21).toISOString().split('T')[0],
-          packingStart: addDays(start, 21).toISOString().split('T')[0],
-          packingEnd: addDays(start, 22).toISOString().split('T')[0],
+          cuttingEnd: cutEnd.toISOString().split('T')[0],
+          sewingStart: sewStart.toISOString().split('T')[0],
+          sewingEnd: sewEnd.toISOString().split('T')[0],
+          revisionStart: revStart.toISOString().split('T')[0],
+          revisionEnd: revEnd.toISOString().split('T')[0],
+          packingStart: packStart.toISOString().split('T')[0],
+          packingEnd: packEnd.toISOString().split('T')[0],
       });
+      addToast({ type: 'info', title: 'Datas Sugeridas', message: 'Cronograma calculado com base nas configurações.' });
   };
 
   const applyPartnerToAll = (type: 'cutter' | 'subcontractor', value: string) => {
@@ -340,7 +424,13 @@ export const ProductionWizard: React.FC = () => {
                   phaseDates: phaseDates, 
                   subcontractor: model.subcontractor,
                   costSnapshot: model.techPack.totalCost,
-                  cuttingDetails: cuttingDetails
+                  cuttingDetails: cuttingDetails,
+                  // NEW FIELDS
+                  selectedFabricId: model.selectedFabricId,
+                  fabricPurchasedTotal: model.fabricPurchasedTotal,
+                  fabricPurchasedBreakdown: model.fabricPurchasedBreakdown,
+                  plannedMarkerWidth: model.plannedMarkerWidth,
+                  plannedMarkerLength: model.plannedMarkerLength
               };
 
               if (model.existingOpId) {
@@ -350,11 +440,11 @@ export const ProductionWizard: React.FC = () => {
               }
           }
 
-          alert(status === OrderStatus.DRAFT ? 'Rascunho salvo!' : `Lote ${batchBaseId} processado com sucesso!`);
+          addToast({ type: 'success', title: 'Salvo', message: status === OrderStatus.DRAFT ? 'Rascunho salvo!' : `Lote ${batchBaseId} processado com sucesso!` });
           navigate('/ops');
       } catch (error) {
           console.error("Erro ao salvar:", error);
-          alert("Erro ao salvar ordem de produção.");
+          addToast({ type: 'error', title: 'Erro', message: "Erro ao salvar ordem de produção." });
           setIsSubmitting(false); // Unlock on error
       }
   };
@@ -423,7 +513,8 @@ export const ProductionWizard: React.FC = () => {
                 <div className="border rounded-xl overflow-hidden flex flex-col h-[450px] shadow-sm">
                     <div className="bg-gray-50 p-3 font-bold text-gray-600 border-b">Produtos Disponíveis</div>
                     <div className="overflow-y-auto p-2 space-y-2 flex-1 bg-gray-50/30">
-                        {filteredProducts.map(p => (
+                        {isLoading && <div className="p-4 text-center text-gray-400"><Loader2 className="animate-spin inline mr-2"/> Carregando produtos...</div>}
+                        {!isLoading && filteredProducts.map(p => (
                             <div key={p.id} className="flex items-center gap-3 p-3 bg-white hover:bg-blue-50 rounded-lg border border-gray-100 hover:border-blue-200 cursor-pointer group transition-all shadow-sm" onClick={() => handleAddProduct(p)}>
                                 <img src={p.imageUrl} className="w-12 h-12 rounded bg-gray-200 object-cover"/>
                                 <div className="flex-1"><div className="font-bold text-gray-800">{p.sku}</div><div className="text-xs text-gray-500">{p.name}</div></div>
@@ -450,11 +541,11 @@ export const ProductionWizard: React.FC = () => {
           </div>
         )}
 
-        {/* Step 2: Grade */}
+        {/* Step 2: Grade & Fabric Planning */}
         {step === 2 && (
-          <div className="p-8 animate-fade-in flex flex-col h-full bg-slate-50">
+          <div className="p-8 animate-fade-in flex flex-col h-full bg-slate-50 overflow-y-auto">
              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-gray-800">2. Definição de Grade por Modelo</h2>
+                <h2 className="text-xl font-bold text-gray-800">2. Definição de Grade e Consumo</h2>
                 <div className="text-sm bg-blue-600 text-white px-4 py-1.5 rounded-full font-bold shadow-lg">Total Geral: {selectedModels.reduce((a,b) => a + b.totalPieces, 0)} peças</div>
              </div>
              <div className="flex gap-2 overflow-x-auto pb-2 mb-6">
@@ -466,35 +557,124 @@ export const ProductionWizard: React.FC = () => {
              </div>
              {selectedModels.map(m => {
                  if (m.uid !== activeModelTab) return null;
+                 
+                 // FIX: Calculate total matrix pieces across ALL models in the batch
+                 // This ensures that for a mixed marker (shared layout), the divisor reflects all pieces in the marker.
+                 const totalBatchMatrixSum = selectedModels.reduce((acc, model) => {
+                     return acc + model.matrix.reduce((rAcc, item) => rAcc + Number(item.ratio), 0);
+                 }, 0);
+
+                 // FIX: Consumption = Marker Length / Total Pieces in Marker (Sum of all models' ratios)
+                 const consumption = (m.plannedMarkerLength && totalBatchMatrixSum > 0) ? (Number(m.plannedMarkerLength) / totalBatchMatrixSum).toFixed(3) : '0.000';
+
                  return (
-                     <div key={m.uid} className="animate-fade-in bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                            <div className="bg-gray-50 border border-gray-200 rounded-xl overflow-hidden">
-                                <div className="bg-gray-100 p-3 font-bold text-gray-700 border-b flex items-center gap-2"><Grid3X3 size={18}/> Risco (Peças na Mesa)</div>
-                                <div className="p-4 space-y-2">
-                                    {m.matrix.map(mtx => (
-                                        <div key={mtx.size} className="flex justify-between items-center bg-white p-2 rounded border border-gray-200 shadow-sm">
-                                            <span className="font-bold w-12 text-center text-lg">{mtx.size}</span>
-                                            <div className="flex items-center gap-2">
-                                                <button onClick={() => updateModelRatio(m.uid, mtx.size, Math.max(0, mtx.ratio - 1))} className="w-8 h-8 rounded bg-gray-100 font-bold border">-</button>
-                                                <input className="w-16 text-center font-bold border rounded p-1 text-lg" value={mtx.ratio} onChange={e => updateModelRatio(m.uid, mtx.size, parseInt(e.target.value) || 0)}/>
-                                                <button onClick={() => updateModelRatio(m.uid, mtx.size, mtx.ratio + 1)} className="w-8 h-8 rounded bg-blue-50 font-bold text-blue-600 border border-blue-200">+</button>
+                     <div key={m.uid} className="animate-fade-in space-y-6">
+                         {/* GRADE SECTION */}
+                         <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                                <div className="bg-gray-50 border border-gray-200 rounded-xl overflow-hidden">
+                                    <div className="bg-gray-100 p-3 font-bold text-gray-700 border-b flex items-center gap-2"><Grid3X3 size={18}/> Risco (Peças na Mesa)</div>
+                                    <div className="p-4 space-y-2">
+                                        {m.matrix.map(mtx => (
+                                            <div key={mtx.size} className="flex justify-between items-center bg-white p-2 rounded border border-gray-200 shadow-sm">
+                                                <span className="font-bold w-12 text-center text-lg">{mtx.size}</span>
+                                                <div className="flex items-center gap-2">
+                                                    <button onClick={() => updateModelRatio(m.uid, mtx.size, Math.max(0, mtx.ratio - 1))} className="w-8 h-8 rounded bg-gray-100 font-bold border">-</button>
+                                                    <input className="w-16 text-center font-bold border rounded p-1 text-lg" value={mtx.ratio} onChange={e => updateModelRatio(m.uid, mtx.size, parseInt(e.target.value) || 0)}/>
+                                                    <button onClick={() => updateModelRatio(m.uid, mtx.size, mtx.ratio + 1)} className="w-8 h-8 rounded bg-blue-50 font-bold text-blue-600 border border-blue-200">+</button>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        ))}
+                                    </div>
                                 </div>
-                            </div>
-                            <div className="bg-gray-50 border border-gray-200 rounded-xl overflow-hidden">
-                                <div className="bg-gray-100 p-3 font-bold text-gray-700 border-b flex items-center gap-2"><Layers size={18}/> Folhas por Cor</div>
-                                <div className="p-4 space-y-2">
-                                    {m.layers.map(lyr => (
-                                        <div key={lyr.color} className="flex justify-between items-center bg-white p-2 rounded border border-gray-200 shadow-sm">
-                                            <span className="font-medium flex items-center gap-2"><div className="w-4 h-4 rounded-full border" style={{backgroundColor: getColorStyle(lyr.color)}}></div>{lyr.color}</span>
-                                            <div className="flex items-center gap-2"><input className="w-20 text-center font-bold border rounded p-1 text-lg" value={lyr.layers} onChange={e => updateModelLayer(m.uid, lyr.color, parseInt(e.target.value) || 0)}/><span className="text-xs text-gray-400 font-bold">fls</span></div>
-                                        </div>
-                                    ))}
+                                <div className="bg-gray-50 border border-gray-200 rounded-xl overflow-hidden">
+                                    <div className="bg-gray-100 p-3 font-bold text-gray-700 border-b flex items-center gap-2"><Layers size={18}/> Folhas por Cor</div>
+                                    <div className="p-4 space-y-2">
+                                        {m.layers.map(lyr => (
+                                            <div key={lyr.color} className="flex justify-between items-center bg-white p-2 rounded border border-gray-200 shadow-sm">
+                                                <span className="font-medium flex items-center gap-2"><div className="w-4 h-4 rounded-full border" style={{backgroundColor: resolveColorHex(lyr.color)}}></div>{lyr.color}</span>
+                                                <div className="flex items-center gap-2"><input className="w-20 text-center font-bold border rounded p-1 text-lg" value={lyr.layers} onChange={e => updateModelLayer(m.uid, lyr.color, parseInt(e.target.value) || 0)}/><span className="text-xs text-gray-400 font-bold">fls</span></div>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
-                            </div>
+                             </div>
+                             
+                             {/* NEW: MARKER DETAILS */}
+                             <div className="mt-6 pt-4 border-t border-gray-100">
+                                 <h4 className="font-bold text-gray-700 mb-3 flex items-center gap-2"><Ruler size={16}/> Dados do Risco (CAD) <span className="text-gray-400 text-xs font-normal">(Opcional)</span></h4>
+                                 <div className="flex items-end gap-4">
+                                     <div>
+                                         <label className="block text-xs text-gray-500 font-bold mb-1">Largura (m)</label>
+                                         <input type="number" step="0.01" className="border rounded p-2 w-24" placeholder="1.80" value={m.plannedMarkerWidth || ''} onChange={e => updateModelFabric(m.uid, 'plannedMarkerWidth', parseFloat(e.target.value))} />
+                                     </div>
+                                     <div>
+                                         <label className="block text-xs text-gray-500 font-bold mb-1">Comprimento (m)</label>
+                                         <input type="number" step="0.01" className="border rounded p-2 w-24" placeholder="5.00" value={m.plannedMarkerLength || ''} onChange={e => updateModelFabric(m.uid, 'plannedMarkerLength', parseFloat(e.target.value))} />
+                                     </div>
+                                     <div className="bg-blue-50 px-4 py-2 rounded-lg border border-blue-100">
+                                         <div className="text-xs text-blue-500 font-bold uppercase">Consumo Médio</div>
+                                         <div className="text-lg font-bold text-blue-700">{consumption} <span className="text-xs font-normal">m/peça</span></div>
+                                     </div>
+                                     <div className="bg-gray-50 px-4 py-2 rounded-lg border border-gray-200">
+                                         <div className="text-xs text-gray-500 font-bold uppercase">Total de Riscos</div>
+                                         <div className="text-lg font-bold text-gray-700">{totalBatchMatrixSum}</div>
+                                     </div>
+                                 </div>
+                             </div>
+                         </div>
+
+                         {/* NEW: FABRIC PLANNING SECTION */}
+                         <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                             <div className="flex justify-between items-center mb-4">
+                                 <h4 className="font-bold text-gray-700 flex items-center gap-2"><Scissors size={18} className="text-orange-500"/> Planejamento de Tecido <span className="text-gray-400 text-xs font-normal bg-gray-100 px-2 py-0.5 rounded ml-2">Opcional</span></h4>
+                             </div>
+                             
+                             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                 <div>
+                                     <label className="block text-sm font-bold text-gray-600 mb-1">Tecido Principal</label>
+                                     <select className="w-full border rounded p-2 mb-4" value={m.selectedFabricId || ''} onChange={e => updateModelFabric(m.uid, 'selectedFabricId', e.target.value)}>
+                                         <option value="">Selecione do Estoque...</option>
+                                         {materials.filter(mat => mat.type === 'Tecido').map(mat => (
+                                             <option key={mat.id} value={mat.id}>{mat.name} ({mat.currentStock} {mat.unit})</option>
+                                         ))}
+                                     </select>
+
+                                     <label className="block text-sm font-bold text-gray-600 mb-1 flex items-center gap-1">
+                                        Total Comprado (Kg/M) 
+                                        <span title="Quantidade total disponível para corte"><Info size={12} className="text-blue-500" /></span>
+                                     </label>
+                                     <input 
+                                        type="number" 
+                                        step="0.01" 
+                                        className="w-full border rounded p-2 font-bold text-lg text-gray-700" 
+                                        placeholder="0.00"
+                                        value={m.fabricPurchasedTotal || ''}
+                                        onChange={e => updateModelFabric(m.uid, 'fabricPurchasedTotal', parseFloat(e.target.value))}
+                                     />
+                                 </div>
+                                 
+                                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                                     <h5 className="text-xs font-bold text-gray-500 uppercase mb-3">Distribuição por Cor (Compra Realizada)</h5>
+                                     <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                                         {m.layers.map(l => (
+                                             <div key={l.color} className="flex justify-between items-center">
+                                                 <span className="flex items-center gap-2 text-sm text-gray-700 font-medium w-1/2">
+                                                     <div className="w-3 h-3 rounded-full border" style={{backgroundColor: resolveColorHex(l.color)}}></div> {l.color}
+                                                 </span>
+                                                 <input 
+                                                    type="number" 
+                                                    step="0.01" 
+                                                    className="w-24 border rounded p-1 text-right text-sm" 
+                                                    placeholder="0"
+                                                    value={m.fabricPurchasedBreakdown?.[l.color] || ''}
+                                                    onChange={e => updateFabricBreakdown(m.uid, l.color, parseFloat(e.target.value))}
+                                                 />
+                                             </div>
+                                         ))}
+                                     </div>
+                                 </div>
+                             </div>
                          </div>
                      </div>
                  )
@@ -625,7 +805,7 @@ export const ProductionWizard: React.FC = () => {
                                           <tbody className="divide-y divide-gray-100">
                                               {tableData.map((row, i) => (
                                                   <tr key={i} className="hover:bg-blue-50/30">
-                                                      <td className="p-3 text-left font-medium flex items-center gap-2"><div className="w-3 h-3 rounded-full border shadow-sm" style={{backgroundColor: getColorStyle(row.color)}}></div>{row.color}</td>
+                                                      <td className="p-3 text-left font-medium flex items-center gap-2"><div className="w-3 h-3 rounded-full border shadow-sm" style={{backgroundColor: resolveColorHex(row.color)}}></div>{row.color}</td>
                                                       {sizes.map(s => <td key={s} className="p-3">{row[s] || '-'}</td>)}
                                                       <td className="p-3 font-bold bg-gray-50 text-blue-700">{row.total}</td>
                                                   </tr>

@@ -1,614 +1,490 @@
 
-import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { Material, Product, FinishedProductStock, WIPItem, ProductStatus, MaterialType, UnitOfMeasure, ImportPreviewItem, ProductionOrder } from '../types';
+import React, { useState, useMemo } from 'react';
 import { ApiService } from '../services/api';
-import { 
-  Package, Search, Plus, Download, Factory, 
-  Layers, CheckCircle2, AlertTriangle, XCircle, History, MoreVertical, Lock, ClipboardList, RotateCcw, Truck, Scissors, FileText, ClipboardCheck, Calendar, Archive, FileOutput, Printer, X, RefreshCw
-} from 'lucide-react';
+import { Package, Search, Download, Layers, FileOutput, Loader2, RefreshCw, X, CheckCircle2, ArrowRight } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useToast } from '../contexts/ToastContext';
+
+// Helper: Cor
+const getColorStyle = (colorName: string) => {
+    const map: any = {
+        'Branco': '#ffffff', 'Preto': '#000000', 'Marinho': '#000080', 'Vermelho': '#ff0000',
+        'Verde': '#008000', 'Amarelo': '#ffff00', 'Azul': '#0000ff', 'Cinza': '#808080',
+        'Rosa': '#ffc0cb', 'Roxo': '#800080'
+    };
+    return map[colorName] || '#cccccc';
+};
+
+interface ConsolidatedStockItem {
+    id: string; // Composite ID: ProductID-Color-Size
+    productId: string;
+    productName: string;
+    sku: string;
+    color: string;
+    size: string;
+    fullName: string; // "REF - NOME - TAM - COR"
+    stockIn: number;
+    stockOut: number;
+    balance: number;
+}
+
+interface ExportItem extends ConsolidatedStockItem {
+    exportQty: number;
+}
 
 export const InventoryModule: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'raw' | 'finished' | 'wip'>('finished');
-  
-  // --- REACT QUERY IMPLEMENTATION ---
-  const { data: materials = [], refetch: refetchMaterials } = useQuery({
-    queryKey: ['materials'],
-    queryFn: ApiService.getMaterials
-  });
-
-  const { data: finishedStock = [], refetch: refetchStock } = useQuery({
-    queryKey: ['finishedGoods'],
-    queryFn: ApiService.getFinishedGoods
-  });
-
-  const { data: products = [], refetch: refetchProducts } = useQuery({
-    queryKey: ['products'],
-    queryFn: ApiService.getProducts
-  });
-
-  const { data: wipItems = [], refetch: refetchWip } = useQuery({
-    queryKey: ['wipInventory'],
-    queryFn: ApiService.getWIPInventory
-  });
-
+  const { addToast } = useToast();
   const queryClient = useQueryClient();
-
-  // Local State
+  const [activeTab, setActiveTab] = useState<'stock' | 'history'>('stock');
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedStockIds, setSelectedStockIds] = useState<string[]>([]);
-  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
-
-  // Modals State
-  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
-  const [isMaterialModalOpen, setIsMaterialModalOpen] = useState(false);
-  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
-  const [editingMaterial, setEditingMaterial] = useState<Partial<Material> | null>(null);
   
-  // WIP & OP Detail Modal
-  const [selectedOpDetail, setSelectedOpDetail] = useState<ProductionOrder | null>(null);
+  // Modal State
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [selectedItems, setSelectedItems] = useState<string[]>([]); // Array of Composite IDs
+  const [exportList, setExportList] = useState<ExportItem[]>([]);
+  
+  // Form State
+  const [responsible, setResponsible] = useState('');
+  const [destination, setDestination] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Traceability Modal (Finished Product History)
-  const [selectedStockOp, setSelectedStockOp] = useState<ProductionOrder | null>(null);
-
-  // Report Modal State
-  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
-
-  const refreshAll = () => {
-      refetchMaterials();
-      refetchStock();
-      refetchProducts();
-      refetchWip();
-  };
-
-  const handleOpClick = async (opId: string) => {
-    // Note: getProductionOrderById is fast, but we could also useQuery here if needed.
-    // For single item fetch on click, standard promise is okay.
-    const op = await ApiService.getProductionOrderById(opId);
-    if (op) {
-        setSelectedOpDetail(op);
-        setActiveMenuId(null);
-    }
-  };
-
-  const handleTraceability = async (opId?: string) => {
-      if (!opId) return;
-      const op = await ApiService.getProductionOrderById(opId);
-      if (op) setSelectedStockOp(op);
-      setActiveMenuId(null);
-  };
-
-  const handleRevertToPacking = async (id: string) => {
-      if (!confirm('Tem certeza? Isso removerá o item do estoque e retornará a OP para o status de Embalagem.')) return;
-      try {
-          await ApiService.revertStockToPacking(id);
-          queryClient.invalidateQueries({ queryKey: ['finishedGoods'] });
-          queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
-          setActiveMenuId(null);
-          alert('Item estornado e OP retornada para Embalagem.');
-      } catch (err: any) {
-          alert(err.message);
-      }
-  };
-
-  const handleMarkExported = async () => {
-      if (selectedStockIds.length === 0) return;
-      await ApiService.markStockAsExported(selectedStockIds);
-      queryClient.invalidateQueries({ queryKey: ['finishedGoods'] });
-      setSelectedStockIds([]);
-      setIsReportModalOpen(false); // Close report modal
-      setActiveMenuId(null);
-      alert('Itens marcados como Exportado.');
-  };
-
-  // --- Search Logic for Finished Stock ---
-  const filteredStock = finishedStock.filter(item => {
-      const prod = products.find(p => p.id === item.productId);
-      const term = searchTerm.toLowerCase();
-      return (
-          prod?.sku.toLowerCase().includes(term) ||
-          prod?.name.toLowerCase().includes(term) ||
-          item.warehouse.toLowerCase().includes(term) ||
-          (item.opLotNumber || item.opId || '').toLowerCase().includes(term)
-      );
+  // --- 1. DATA FETCHING (CACHE INTELIGENTE) ---
+  
+  const { data: products = [] } = useQuery({
+      queryKey: ['products'],
+      queryFn: ApiService.getProducts,
+      staleTime: 1000 * 60 * 5 
   });
 
-  const stats = useMemo(() => {
-      const totalItems = finishedStock.length;
-      const available = finishedStock.filter(s => s.status === 'Disponível').length;
-      const exported = finishedStock.filter(s => s.status === 'Exportado').length;
-      const totalValue = finishedStock.reduce((acc, s) => acc + (s.price || 0), 0);
-      return { totalItems, available, exported, totalValue };
-  }, [finishedStock]);
+  const { data: finishedGoods = [], isLoading: loadingIn } = useQuery({
+      queryKey: ['finishedGoods'], // ENTRIES (From Packing)
+      queryFn: ApiService.getFinishedGoods,
+      staleTime: 1000 * 60 * 2
+  });
 
-  const handleOpenExportReport = () => {
-      if (selectedStockIds.length === 0) {
-          alert('Selecione os itens para gerar o romaneio.');
+  const { data: exports = [], isLoading: loadingOut } = useQuery({
+      queryKey: ['inventoryExports'], // EXITS (New Table)
+      queryFn: ApiService.getInventoryExports,
+      staleTime: 1000 * 60 * 2
+  });
+
+  // --- 2. CORE LOGIC: CONSOLIDATION (EVENT SOURCING) ---
+  
+  const consolidatedStock = useMemo(() => {
+      const stockMap: Record<string, ConsolidatedStockItem> = {};
+
+      // A. Initialize Variants from Tech Packs (Source of Truth)
+      products.forEach(p => {
+          // Determine active variants from tech pack or product default
+          const tp = p.techPacks?.[0];
+          const activeSizes = tp?.activeSizes?.length ? tp.activeSizes : p.sizes;
+          const activeColors = p.colors || [];
+
+          activeSizes.forEach((size: string) => {
+              activeColors.forEach((color: string) => {
+                  const key = `${p.id}-${color}-${size}`;
+                  stockMap[key] = {
+                      id: key,
+                      productId: p.id,
+                      productName: p.name,
+                      sku: p.sku,
+                      color,
+                      size,
+                      fullName: `${p.sku} - ${p.name} - ${size} - ${color}`,
+                      stockIn: 0,
+                      stockOut: 0,
+                      balance: 0
+                  };
+              });
+          });
+      });
+
+      // B. Process Entries (Finished Goods)
+      finishedGoods.forEach((item: any) => {
+          const key = `${item.productId}-${item.color}-${item.size}`;
+          // If variant exists in map (it should), add to stockIn
+          if (stockMap[key]) {
+              stockMap[key].stockIn += Number(item.quantity) || 0;
+          } else {
+              // Fallback for orphans (e.g. old products)
+              // We create a temporary entry to show this stock exists
+              const prod = products.find(p => p.id === item.productId);
+              if (prod) {
+                  stockMap[key] = {
+                      id: key,
+                      productId: prod.id,
+                      productName: prod.name,
+                      sku: prod.sku,
+                      color: item.color,
+                      size: item.size,
+                      fullName: `${prod.sku} - ${prod.name} - ${item.size} - ${item.color}`,
+                      stockIn: Number(item.quantity),
+                      stockOut: 0,
+                      balance: 0
+                  };
+              }
+          }
+      });
+
+      // C. Process Exits (Exports)
+      exports.forEach((item: any) => {
+          const key = `${item.product_id}-${item.color}-${item.size}`;
+          if (stockMap[key]) {
+              stockMap[key].stockOut += Number(item.quantity) || 0;
+          }
+      });
+
+      // D. Calculate Balance & Convert to Array
+      return Object.values(stockMap).map(item => ({
+          ...item,
+          balance: item.stockIn - item.stockOut
+      })).filter(item => {
+          // Optional: Hide items with 0 history if desired, but user asked for "Products Created from Tech Pack" to be there.
+          // So we show everything, or maybe filter by search.
+          return true;
+      });
+
+  }, [products, finishedGoods, exports]);
+
+  // --- 3. FILTERING ---
+  const filteredStock = useMemo(() => {
+      return consolidatedStock.filter(item => 
+          item.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          item.sku.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+  }, [consolidatedStock, searchTerm]);
+
+  // --- ACTIONS ---
+
+  const handleOpenExport = () => {
+      if (selectedItems.length === 0) {
+          addToast({ type: 'warning', title: 'Seleção Vazia', message: 'Selecione pelo menos um produto para exportar.' });
           return;
       }
-      setIsReportModalOpen(true);
+
+      // Prepare Export List
+      const list = selectedItems.map(id => {
+          const item = consolidatedStock.find(x => x.id === id);
+          return { ...item!, exportQty: 0 }; // Init with 0
+      });
+      
+      setExportList(list);
+      setResponsible('');
+      setDestination('');
+      setIsExportModalOpen(true);
+  };
+
+  const updateExportQty = (id: string, qty: number) => {
+      setExportList(prev => prev.map(item => 
+          item.id === id ? { ...item, exportQty: qty } : item
+      ));
+  };
+
+  const handleConfirmExport = async () => {
+      if (!responsible || !destination) {
+          addToast({ type: 'error', title: 'Campos Obrigatórios', message: 'Informe o Responsável e o Destino.' });
+          return;
+      }
+
+      const validItems = exportList.filter(i => i.exportQty > 0);
+      if (validItems.length === 0) {
+          addToast({ type: 'warning', title: 'Qtd Inválida', message: 'Informe a quantidade para pelo menos um item.' });
+          return;
+      }
+
+      // Validate Stock Availability
+      const hasError = validItems.some(i => i.exportQty > i.balance);
+      if (hasError) {
+          addToast({ type: 'error', title: 'Estoque Insuficiente', message: 'Você tentou exportar mais do que o saldo atual.' });
+          return;
+      }
+
+      setIsSubmitting(true);
+      try {
+          const payload = validItems.map(i => ({
+              productId: i.productId,
+              color: i.color,
+              size: i.size,
+              quantity: i.exportQty,
+              destination,
+              responsible
+          }));
+
+          await ApiService.createInventoryExport(payload);
+          
+          addToast({ type: 'success', title: 'Exportação Realizada', message: 'Baixa no estoque efetuada com sucesso.' });
+          
+          // Invalidate Queries to Refresh Table
+          queryClient.invalidateQueries({ queryKey: ['inventoryExports'] });
+          
+          setIsExportModalOpen(false);
+          setSelectedItems([]);
+      } catch (err: any) {
+          addToast({ type: 'error', title: 'Erro', message: err.message });
+      } finally {
+          setIsSubmitting(false);
+      }
   };
 
   const toggleSelect = (id: string) => {
-    setSelectedStockIds(prev => 
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
+      setSelectedItems(prev => 
+          prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+      );
   };
 
-  const getEventIcon = (action: string) => {
-      const lower = action.toLowerCase();
-      if (lower.includes('corte')) return <Scissors size={16}/>;
-      if (lower.includes('envio') || lower.includes('facção')) return <Truck size={16}/>;
-      if (lower.includes('retorno')) return <RotateCcw size={16}/>;
-      if (lower.includes('revisão') || lower.includes('qualidade')) return <ClipboardCheck size={16}/>;
-      if (lower.includes('estoque') || lower.includes('entrada')) return <Package size={16}/>;
-      return <FileText size={16}/>;
+  const toggleSelectAll = () => {
+      if (selectedItems.length === filteredStock.length) setSelectedItems([]);
+      else setSelectedItems(filteredStock.map(i => i.id));
   };
 
-  const renderFinishedGoods = () => {
-    return (
-      <div className="overflow-visible min-h-[400px]">
-        {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-white p-4 rounded-xl border-l-4 border-blue-500 shadow-sm flex items-center justify-between">
-                <div>
-                    <div className="text-gray-500 text-xs font-bold uppercase">Total em Estoque</div>
-                    <div className="text-2xl font-bold text-gray-900">{stats.totalItems} <span className="text-sm font-normal text-gray-400">itens</span></div>
-                </div>
-                <Archive className="text-blue-500" size={24}/>
-            </div>
-            <div className="bg-white p-4 rounded-xl border-l-4 border-green-500 shadow-sm flex items-center justify-between">
-                <div>
-                    <div className="text-gray-500 text-xs font-bold uppercase">Disponível</div>
-                    <div className="text-2xl font-bold text-green-700">{stats.available} <span className="text-sm font-normal text-gray-400">itens</span></div>
-                </div>
-                <CheckCircle2 className="text-green-500" size={24}/>
-            </div>
-            <div className="bg-white p-4 rounded-xl border-l-4 border-gray-500 shadow-sm flex items-center justify-between">
-                <div>
-                    <div className="text-gray-500 text-xs font-bold uppercase">Exportado / Baixado</div>
-                    <div className="text-2xl font-bold text-gray-700">{stats.exported} <span className="text-sm font-normal text-gray-400">itens</span></div>
-                </div>
-                <FileOutput className="text-gray-500" size={24}/>
-            </div>
-        </div>
-
-        <div className="p-2 bg-blue-50 flex justify-between items-center mb-2 rounded text-sm no-print">
-          <div className="flex gap-2 items-center">
-              <span className="font-bold text-blue-800">Selecionados ({selectedStockIds.length}):</span>
-              <button 
-                onClick={handleOpenExportReport}
-                disabled={selectedStockIds.length === 0}
-                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 flex items-center gap-2 font-bold shadow-sm"
-              >
-                  <FileText size={14}/> Romaneio de Expedição / Exportar
-              </button>
-          </div>
-        </div>
-        
-        <table className="w-full text-left text-sm relative">
-          <thead className="bg-gray-100 text-gray-600 font-medium">
-            <tr>
-              <th className="p-3 w-8"><input type="checkbox" onChange={(e) => setSelectedStockIds(e.target.checked ? filteredStock.map(p => p.id) : [])}/></th>
-              <th className="p-3">Produto / SKU</th>
-              <th className="p-3">Cor / Tamanho</th>
-              <th className="p-3">Origem (OP)</th>
-              <th className="p-3">Depósito</th>
-              <th className="p-3 text-right">Qtd</th>
-              <th className="p-3 text-center">Status</th>
-              <th className="p-3 text-right">Ações</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {filteredStock.map(stock => {
-              const prod = products.find(p => p.id === stock.productId);
-              const isExported = stock.status === 'Exportado';
-
-              return (
-                <tr key={stock.id} className={`hover:bg-blue-50/50 group relative ${isExported ? 'bg-gray-50 text-gray-400' : ''}`}>
-                  <td className="p-3"><input type="checkbox" checked={selectedStockIds.includes(stock.id)} onChange={() => toggleSelect(stock.id)} /></td>
-                  <td className="p-3">
-                    <div className="font-bold text-gray-900">
-                      {prod?.name}
-                    </div>
-                    <div className="text-xs text-blue-600 font-mono font-bold mt-0.5">{prod?.sku}</div>
-                  </td>
-                  <td className="p-3">
-                     <span className="font-bold">{stock.size}</span>
-                     <span className="text-gray-400 mx-1">|</span>
-                     <span>{stock.color}</span>
-                  </td>
-                  <td className="p-3 font-mono text-xs font-bold text-gray-700">
-                     {stock.opLotNumber || stock.opId}
-                  </td>
-                  <td className="p-3">{stock.warehouse}</td>
-                  <td className="p-3 text-right font-bold">{stock.quantity}</td>
-                  <td className="p-3 text-center">
-                    <span className={`px-2 py-1 rounded-full text-xs font-bold border flex items-center justify-center gap-1 w-fit mx-auto
-                      ${isExported ? 'bg-gray-200 text-gray-600 border-gray-300' : 'bg-green-100 text-green-700 border-green-200'}
-                    `}>
-                      {isExported && <Lock size={10}/>}
-                      {stock.status}
-                    </span>
-                  </td>
-                  <td className="p-3 text-right relative">
-                      <button 
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setActiveMenuId(activeMenuId === stock.id ? null : stock.id);
-                        }} 
-                        className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-                      >
-                          <MoreVertical size={16}/>
-                      </button>
-                      
-                      {activeMenuId === stock.id && (
-                          <div className="absolute right-10 top-2 bg-white shadow-2xl border border-gray-200 rounded-lg z-50 w-52 overflow-hidden animate-fade-in text-left">
-                              <div className="py-1">
-                                  <button onClick={() => handleTraceability(stock.opId)} className="w-full px-4 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700 text-sm">
-                                      <History size={16}/> Histórico / Rastreio
-                                  </button>
-                                  <button onClick={() => handleOpClick(stock.opId || '')} className="w-full px-4 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700 text-sm">
-                                      <ClipboardList size={16}/> Visualizar OP
-                                  </button>
-                                  
-                                  {!isExported && (
-                                    <>
-                                        <div className="border-t my-1"></div>
-                                        <button onClick={() => handleRevertToPacking(stock.id)} className="w-full px-4 py-2 hover:bg-orange-50 flex items-center gap-2 text-orange-700 font-medium text-sm">
-                                            <RotateCcw size={16}/> Estornar (Embalagem)
-                                        </button>
-                                    </>
-                                  )}
-                              </div>
-                          </div>
-                      )}
-                  </td>
-                </tr>
-              );
-            })}
-             {filteredStock.length === 0 && (
-              <tr><td colSpan={8} className="p-8 text-center text-gray-400">Nenhum item encontrado no estoque.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    );
-  };
-
-  const renderWIP = () => (
-    <div className="space-y-4">
-      {wipItems.map((item, idx) => (
-        <div 
-           key={idx} 
-           className="bg-white p-4 rounded-lg border border-yellow-200 shadow-sm flex items-center justify-between cursor-pointer hover:shadow-md transition-shadow"
-           onClick={() => handleOpClick(item.opId)}
-        >
-          <div className="flex items-center gap-4">
-            <div className="p-3 bg-yellow-100 text-yellow-700 rounded-lg">
-              <Factory size={24} />
-            </div>
-            <div>
-              <div className="font-bold text-gray-900">{item.product?.name}</div>
-              <div className="text-sm text-gray-500">OP: <span className="font-mono font-bold text-blue-600 hover:underline">{item.opId}</span></div>
-            </div>
-          </div>
-          <div className="text-right">
-             <div className="text-2xl font-bold text-gray-800">{item.quantity} <span className="text-sm font-normal text-gray-500">pçs</span></div>
-             <div className="text-xs font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded mt-1 inline-block">
-               {item.stage} • {item.subcontractor}
-             </div>
-          </div>
-        </div>
-      ))}
-      {wipItems.length === 0 && <div className="text-center py-8 text-gray-400">Nenhuma OP em andamento no momento.</div>}
-    </div>
-  );
-
-  const renderRawMaterials = () => (
-    <table className="w-full text-left text-sm">
-          <thead className="bg-gray-50 text-gray-600">
-            <tr>
-              <th className="p-4">Código</th>
-              <th className="p-4">Nome / Descrição</th>
-              <th className="p-4">Tipo</th>
-              <th className="p-4 text-right">Saldo Atual</th>
-              <th className="p-4 text-right">Custo Unit.</th>
-              <th className="p-4">Fornecedor</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {materials.map(m => (
-              <tr key={m.id} className="hover:bg-teal-50/30 cursor-pointer" onClick={() => { setEditingMaterial(m); setIsMaterialModalOpen(true); }}>
-                <td className="p-4 font-mono text-gray-500">{m.code}</td>
-                <td className="p-4 font-medium text-gray-900">{m.name}</td>
-                <td className="p-4">
-                  <span className={`px-2 py-1 rounded-full text-xs 
-                    ${m.type === 'Tecido' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}
-                  `}>
-                    {m.type}
-                  </span>
-                </td>
-                <td className="p-4 text-right font-bold text-gray-800">
-                  {m.currentStock.toLocaleString()} <span className="text-xs font-normal text-gray-500">{m.unit}</span>
-                </td>
-                <td className="p-4 text-right">R$ {m.costUnit.toFixed(2)}</td>
-                <td className="p-4 text-gray-600">{m.supplier}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-  );
+  // --- RENDERERS ---
 
   return (
-    <div className="space-y-6" onClick={() => setActiveMenuId(null)}>
-       <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+    <div className="space-y-6 pb-20">
+      
+      {/* HEADER */}
+      <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Package className="text-teal-600" /> Gestão de Estoque
+            <Package className="text-teal-600" /> Estoque de Produtos Acabados
           </h1>
-          <p className="text-gray-500 text-sm">Controle de matéria-prima, WIP e produtos acabados.</p>
+          <p className="text-gray-500 text-sm">Controle de saldo consolidado por variante (SKU + Cor + Tamanho).</p>
         </div>
         <div className="flex gap-2">
-          <button 
-            onClick={refreshAll}
-            className="p-2 border rounded-lg hover:bg-gray-50 text-gray-600"
-            title="Atualizar"
-          >
-              <RefreshCw size={18}/>
-          </button>
-          <button 
-            onClick={() => {
-               if(activeTab === 'raw') { setEditingMaterial({ type: MaterialType.FABRIC, unit: UnitOfMeasure.KG }); setIsMaterialModalOpen(true); }
-               else { setEditingProduct(null); setIsProductModalOpen(true); }
-            }} 
-            className="bg-teal-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-teal-700 flex items-center gap-2"
-          >
-            <Plus size={18}/> Novo Item
-          </button>
+            <button 
+                onClick={() => queryClient.invalidateQueries()}
+                className="p-2 border rounded-lg text-gray-500 hover:bg-gray-50"
+                title="Atualizar"
+            >
+                <RefreshCw size={18} className={loadingIn || loadingOut ? 'animate-spin' : ''}/>
+            </button>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex gap-6">
+      {/* TABS */}
+      <div className="flex gap-6 border-b border-gray-200">
           <button 
-            onClick={() => setActiveTab('finished')}
-            className={`pb-4 px-1 font-medium text-sm border-b-2 transition-colors flex items-center gap-2
-              ${activeTab === 'finished' ? 'border-teal-600 text-teal-600' : 'border-transparent text-gray-500 hover:text-gray-700'}
-            `}
+            onClick={() => setActiveTab('stock')}
+            className={`pb-3 px-1 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'stock' ? 'border-teal-600 text-teal-600' : 'border-transparent text-gray-500'}`}
           >
-            <Package size={16}/> Produtos Acabados (Detalhado)
+              <Layers size={16}/> Visão Geral do Estoque
           </button>
           <button 
-            onClick={() => setActiveTab('wip')}
-            className={`pb-4 px-1 font-medium text-sm border-b-2 transition-colors flex items-center gap-2
-              ${activeTab === 'wip' ? 'border-yellow-500 text-yellow-600' : 'border-transparent text-gray-500 hover:text-gray-700'}
-            `}
+            onClick={() => setActiveTab('history')}
+            className={`pb-3 px-1 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'history' ? 'border-teal-600 text-teal-600' : 'border-transparent text-gray-500'}`}
           >
-            <Factory size={16}/> Em Produção (WIP)
+              <FileOutput size={16}/> Histórico de Saídas (Log)
           </button>
-          <button 
-            onClick={() => setActiveTab('raw')}
-            className={`pb-4 px-1 font-medium text-sm border-b-2 transition-colors flex items-center gap-2
-              ${activeTab === 'raw' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}
-            `}
-          >
-            <Layers size={16}/> Matéria Prima
-          </button>
-        </nav>
       </div>
 
-      {/* Content Area */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 min-h-[400px]">
-        {/* Search Bar */}
-        <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
-           <div className="relative max-w-md w-full">
-             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-             <input 
-               type="text" 
-               placeholder="Buscar SKU, Produto, Tamanho, OP..." 
-               className="w-full pl-10 pr-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-               value={searchTerm}
-               onChange={(e) => setSearchTerm(e.target.value)}
-             />
-           </div>
-        </div>
+      {/* STOCK VIEW */}
+      {activeTab === 'stock' && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-h-[500px] flex flex-col">
+              
+              {/* TOOLBAR */}
+              <div className="p-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
+                  <div className="relative w-96">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18}/>
+                      <input 
+                        className="w-full pl-10 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-teal-500 outline-none"
+                        placeholder="Buscar Variante (Ref, Nome, Cor...)"
+                        value={searchTerm}
+                        onChange={e => setSearchTerm(e.target.value)}
+                      />
+                  </div>
+                  
+                  {selectedItems.length > 0 && (
+                      <div className="flex items-center gap-4 animate-fade-in">
+                          <span className="text-sm font-bold text-teal-800">{selectedItems.length} selecionados</span>
+                          <button 
+                            onClick={handleOpenExport}
+                            className="bg-teal-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-teal-700 flex items-center gap-2 shadow-sm"
+                          >
+                              <FileOutput size={16}/> Exportar em Massa
+                          </button>
+                      </div>
+                  )}
+              </div>
 
-        {activeTab === 'finished' && renderFinishedGoods()}
-        {activeTab === 'wip' && <div className="p-6">{renderWIP()}</div>}
-        {activeTab === 'raw' && renderRawMaterials()}
-      </div>
-
-      {/* --- MODALS --- */}
-
-      {/* 1. VIEW OP DETAIL MODAL */}
-      {selectedOpDetail && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg animate-scale-in overflow-hidden">
-                <div className="bg-blue-600 p-4 text-white flex justify-between items-center">
-                    <h3 className="font-bold flex items-center gap-2"><ClipboardList/> Detalhes da Ordem de Produção</h3>
-                    <button onClick={() => setSelectedOpDetail(null)} className="hover:bg-blue-700 p-1 rounded"><XCircle size={20}/></button>
-                </div>
-                <div className="p-6 space-y-4">
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div className="bg-gray-50 p-3 rounded">
-                            <div className="text-gray-500 text-xs font-bold uppercase">Lote</div>
-                            <div className="font-mono font-bold text-lg text-blue-700">{selectedOpDetail.lotNumber}</div>
-                        </div>
-                        <div className="bg-gray-50 p-3 rounded">
-                            <div className="text-gray-500 text-xs font-bold uppercase">Status</div>
-                            <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-bold">{selectedOpDetail.status}</span>
-                        </div>
-                    </div>
-                    <div>
-                        <div className="text-gray-500 text-xs font-bold uppercase mb-1">Produto</div>
-                        <div className="font-bold">{products.find(p => p.id === selectedOpDetail.productId)?.name}</div>
-                    </div>
-                    <div>
-                        <div className="text-gray-500 text-xs font-bold uppercase mb-1">Histórico Recente</div>
-                        <div className="space-y-2 max-h-40 overflow-y-auto border rounded p-2 text-xs">
-                            {selectedOpDetail.events?.map((ev, i) => (
-                                <div key={i} className="flex flex-col border-b last:border-0 pb-1 mb-1">
-                                    <div className="flex justify-between text-gray-400 mb-0.5">
-                                        <span>{new Date(ev.date).toLocaleString()}</span>
-                                        <span className="font-bold text-gray-600">{ev.user}</span>
-                                    </div>
-                                    <div className="flex gap-2">
-                                        <span className="font-bold">{ev.action}:</span>
-                                        <span className="text-gray-600 truncate">{ev.description}</span>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+              {/* TABLE */}
+              <div className="overflow-x-auto flex-1">
+                  <table className="w-full text-left text-sm">
+                      <thead className="bg-gray-100 text-gray-700 font-bold uppercase text-xs sticky top-0 z-10">
+                          <tr>
+                              <th className="p-4 w-10 text-center">
+                                  <input type="checkbox" onChange={toggleSelectAll} checked={selectedItems.length === filteredStock.length && filteredStock.length > 0}/>
+                              </th>
+                              <th className="p-4">Produto (Variante Única)</th>
+                              <th className="p-4 text-center">Cor</th>
+                              <th className="p-4 text-center">Tam</th>
+                              <th className="p-4 text-right text-gray-400">Entradas</th>
+                              <th className="p-4 text-right text-gray-400">Saídas</th>
+                              <th className="p-4 text-right bg-gray-50 border-l">Saldo Atual</th>
+                          </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                          {filteredStock.map(item => (
+                              <tr key={item.id} className="hover:bg-teal-50/30 transition-colors group">
+                                  <td className="p-4 text-center">
+                                      <input 
+                                        type="checkbox" 
+                                        checked={selectedItems.includes(item.id)}
+                                        onChange={() => toggleSelect(item.id)}
+                                      />
+                                  </td>
+                                  <td className="p-4 font-mono font-bold text-gray-700">
+                                      {item.fullName}
+                                  </td>
+                                  <td className="p-4 text-center">
+                                      <div className="flex items-center justify-center gap-2">
+                                          <div className="w-3 h-3 rounded-full border border-gray-300" style={{backgroundColor: getColorStyle(item.color)}}></div>
+                                          {item.color}
+                                      </div>
+                                  </td>
+                                  <td className="p-4 text-center font-bold">{item.size}</td>
+                                  <td className="p-4 text-right text-gray-400">{item.stockIn}</td>
+                                  <td className="p-4 text-right text-red-400">{item.stockOut > 0 ? `-${item.stockOut}` : '0'}</td>
+                                  <td className="p-4 text-right font-bold text-lg bg-gray-50 border-l text-gray-900">
+                                      {item.balance}
+                                  </td>
+                              </tr>
+                          ))}
+                          {filteredStock.length === 0 && (
+                              <tr><td colSpan={7} className="p-12 text-center text-gray-400">Nenhum produto encontrado.</td></tr>
+                          )}
+                      </tbody>
+                  </table>
+              </div>
+          </div>
       )}
 
-      {/* 2. REPORT / EXPORT MODAL */}
-      {isReportModalOpen && (
-          <div className="fixed inset-0 bg-gray-500/90 z-[60] flex justify-center overflow-y-auto">
-              <div className="relative my-8 w-[210mm] min-h-[297mm] bg-white shadow-2xl p-12 animate-fade-in printable-sheet text-gray-900">
-                  {/* Print Controls */}
-                  <div className="absolute -top-12 right-0 flex gap-2 no-print">
-                      <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-blue-700 flex items-center gap-2"><Printer size={18}/> Imprimir</button>
-                      <button onClick={handleMarkExported} className="bg-green-600 text-white px-4 py-2 rounded shadow font-bold hover:bg-green-700 flex items-center gap-2"><CheckCircle2 size={18}/> Confirmar Baixa (Exportar)</button>
-                      <button onClick={() => setIsReportModalOpen(false)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded shadow font-bold hover:bg-gray-300 flex items-center gap-2"><X size={18}/> Cancelar</button>
-                  </div>
-
-                  {/* HEADER */}
-                  <div className="border-b-2 border-gray-800 pb-6 mb-8 flex justify-between items-start">
-                      <div>
-                          <h1 className="text-3xl font-bold uppercase tracking-wide mb-1">Romaneio de Expedição</h1>
-                          <div className="text-sm text-gray-500 uppercase font-bold">Relatório de Saída de Estoque</div>
-                      </div>
-                      <div className="text-right">
-                          <div className="text-sm font-bold">Data Emissão: {new Date().toLocaleDateString()}</div>
-                          <div className="text-xs text-gray-500 mt-1">Ref: EXP-{Date.now().toString().slice(-6)}</div>
-                      </div>
-                  </div>
-
-                  {/* SUMMARY */}
-                  <div className="grid grid-cols-3 gap-6 mb-8 bg-gray-50 p-4 rounded border border-gray-200">
-                      <div>
-                          <div className="text-xs font-bold text-gray-500 uppercase">Total Itens</div>
-                          <div className="text-2xl font-bold">{selectedStockIds.length}</div>
-                      </div>
-                      <div>
-                          <div className="text-xs font-bold text-gray-500 uppercase">Volume Estimado</div>
-                          <div className="text-2xl font-bold">{Math.ceil(selectedStockIds.length / 50)} <span className="text-sm font-normal text-gray-400">Caixas</span></div>
-                      </div>
-                      <div>
-                          <div className="text-xs font-bold text-gray-500 uppercase">Status Destino</div>
-                          <div className="text-2xl font-bold text-green-700">Exportado</div>
-                      </div>
-                  </div>
-
-                  {/* TABLE */}
-                  <div className="mb-8">
-                      <table className="w-full text-sm border-collapse border border-gray-300">
-                          <thead className="bg-gray-100 font-bold text-left uppercase text-xs">
-                              <tr>
-                                  <th className="border p-2">Item / SKU</th>
-                                  <th className="border p-2">Descrição</th>
-                                  <th className="border p-2 text-center">Tam</th>
-                                  <th className="border p-2 text-center">Cor</th>
-                                  <th className="border p-2 text-center">Qtd</th>
-                                  <th className="border p-2 text-right">Lote Origem</th>
+      {/* HISTORY TAB */}
+      {activeTab === 'history' && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <table className="w-full text-left text-sm">
+                  <thead className="bg-gray-100 text-gray-600 font-bold">
+                      <tr>
+                          <th className="p-4">Data</th>
+                          <th className="p-4">Produto</th>
+                          <th className="p-4 text-center">Cor / Tam</th>
+                          <th className="p-4 text-right">Qtd</th>
+                          <th className="p-4">Destino</th>
+                          <th className="p-4">Responsável</th>
+                      </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                      {exports.slice().reverse().map((log: any) => {
+                          const prod = products.find(p => p.id === log.product_id);
+                          return (
+                              <tr key={log.id} className="hover:bg-gray-50">
+                                  <td className="p-4 text-gray-500">{new Date(log.created_at).toLocaleString()}</td>
+                                  <td className="p-4 font-bold text-gray-800">{prod?.name || 'Produto Excluído'}</td>
+                                  <td className="p-4 text-center">{log.color} / {log.size}</td>
+                                  <td className="p-4 text-right font-bold text-red-600">-{log.quantity}</td>
+                                  <td className="p-4">{log.destination}</td>
+                                  <td className="p-4 text-gray-600 text-xs uppercase font-bold bg-gray-100 rounded w-fit px-2">{log.responsible}</td>
                               </tr>
-                          </thead>
-                          <tbody>
-                              {finishedStock.filter(s => selectedStockIds.includes(s.id)).map((item, idx) => {
-                                  const p = products.find(prod => prod.id === item.productId);
-                                  return (
-                                      <tr key={item.id}>
-                                          <td className="border p-2 font-mono">{p?.sku}</td>
-                                          <td className="border p-2">{p?.name}</td>
-                                          <td className="border p-2 text-center font-bold">{item.size}</td>
-                                          <td className="border p-2 text-center">{item.color}</td>
-                                          <td className="border p-2 text-center font-bold">{item.quantity}</td>
-                                          <td className="border p-2 text-right font-mono text-gray-500">{item.opLotNumber || item.opId}</td>
-                                      </tr>
-                                  )
-                              })}
-                          </tbody>
-                      </table>
+                          );
+                      })}
+                      {exports.length === 0 && (
+                          <tr><td colSpan={6} className="p-12 text-center text-gray-400">Nenhuma exportação registrada.</td></tr>
+                      )}
+                  </tbody>
+              </table>
+          </div>
+      )}
+
+      {/* EXPORT MODAL */}
+      {isExportModalOpen && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl h-[90vh] flex flex-col overflow-hidden animate-scale-in">
+                  <div className="bg-teal-600 p-6 text-white flex justify-between items-center shrink-0">
+                      <div>
+                          <h2 className="text-xl font-bold flex items-center gap-2"><FileOutput/> Exportar / Baixa de Estoque</h2>
+                          <p className="text-teal-100 text-sm mt-1">{selectedItems.length} itens selecionados para saída.</p>
+                      </div>
+                      <button onClick={() => setIsExportModalOpen(false)} className="p-2 hover:bg-teal-700 rounded-full"><X/></button>
                   </div>
 
-                  {/* FOOTER SIGNATURES */}
-                  <div className="mt-20 grid grid-cols-2 gap-20 pt-8 border-t-2 border-dashed border-gray-300">
-                      <div className="text-center">
-                          <div className="border-b border-gray-400 h-8 mb-2"></div>
-                          <div className="text-xs uppercase font-bold text-gray-500">Assinatura Expedição</div>
+                  <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
+                      {/* GLOBAL FIELDS */}
+                      <div className="grid grid-cols-2 gap-6 mb-6 bg-white p-4 rounded-xl border shadow-sm">
+                          <div>
+                              <label className="block text-sm font-bold text-gray-700 mb-1">Destino / Cliente</label>
+                              <input 
+                                className="w-full border rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-teal-500"
+                                placeholder="Ex: Loja Centro, Cliente X..."
+                                value={destination}
+                                onChange={e => setDestination(e.target.value)}
+                                autoFocus
+                              />
+                          </div>
+                          <div>
+                              <label className="block text-sm font-bold text-gray-700 mb-1">Responsável</label>
+                              <input 
+                                className="w-full border rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-teal-500"
+                                placeholder="Quem autorizou?"
+                                value={responsible}
+                                onChange={e => setResponsible(e.target.value)}
+                              />
+                          </div>
                       </div>
-                      <div className="text-center">
-                          <div className="border-b border-gray-400 h-8 mb-2"></div>
-                          <div className="text-xs uppercase font-bold text-gray-500">Assinatura Transportadora / Recebedor</div>
+
+                      {/* ITEMS LIST */}
+                      <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                          <table className="w-full text-sm text-left">
+                              <thead className="bg-gray-100 text-gray-600 font-bold">
+                                  <tr>
+                                      <th className="p-3">Produto</th>
+                                      <th className="p-3 text-center">Saldo Atual</th>
+                                      <th className="p-3 w-40 text-center">Qtd Saída</th>
+                                  </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                  {exportList.map(item => (
+                                      <tr key={item.id}>
+                                          <td className="p-3">
+                                              <div className="font-bold text-gray-800">{item.fullName}</div>
+                                          </td>
+                                          <td className="p-3 text-center font-bold text-gray-600">{item.balance}</td>
+                                          <td className="p-3">
+                                              <input 
+                                                type="number"
+                                                min="0"
+                                                max={item.balance}
+                                                className="w-full border rounded p-2 text-center font-bold text-lg focus:border-teal-500 outline-none"
+                                                value={item.exportQty || ''}
+                                                onChange={e => updateExportQty(item.id, Number(e.target.value))}
+                                                placeholder="0"
+                                              />
+                                          </td>
+                                      </tr>
+                                  ))}
+                              </tbody>
+                          </table>
                       </div>
+                  </div>
+
+                  <div className="p-6 bg-white border-t flex justify-end gap-3 shrink-0">
+                      <button 
+                        onClick={() => setIsExportModalOpen(false)}
+                        className="px-6 py-3 rounded-lg font-bold text-gray-600 hover:bg-gray-100"
+                      >
+                          Cancelar
+                      </button>
+                      <button 
+                        onClick={handleConfirmExport}
+                        disabled={isSubmitting}
+                        className="px-8 py-3 rounded-lg bg-teal-600 text-white font-bold hover:bg-teal-700 shadow-lg flex items-center gap-2 disabled:opacity-50"
+                      >
+                          {isSubmitting ? <Loader2 className="animate-spin"/> : <CheckCircle2/>}
+                          Confirmar Saída
+                      </button>
                   </div>
               </div>
           </div>
       )}
 
-      {/* 3. TRACEABILITY MODAL (History) */}
-      {selectedStockOp && (
-        <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4">
-             <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-scale-in">
-                 <div className="bg-teal-600 p-4 text-white flex justify-between items-center">
-                    <h2 className="font-bold text-lg flex items-center gap-2"><History/> Rastreabilidade do Lote</h2>
-                    <button onClick={() => setSelectedStockOp(null)}><XCircle/></button>
-                 </div>
-                 <div className="flex-1 overflow-y-auto p-8">
-                     <div className="text-center mb-8">
-                        <div className="text-3xl font-bold text-gray-900 mb-1">{selectedStockOp.lotNumber}</div>
-                        <div className="text-gray-500">Ordem de Produção: {selectedStockOp.id}</div>
-                     </div>
-
-                     <div className="space-y-6 relative pl-4 border-l-2 border-gray-200 ml-4">
-                         {(selectedStockOp.events || []).sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime()).map((event, idx) => {
-                             // Detect Materials List
-                             const parts = event.description.split('\n\n');
-                             const mainDesc = parts[0];
-                             const materials = parts[1] && parts[1].includes('Insumos Enviados') ? parts[1] : null;
-
-                             return (
-                                <div key={idx} className="relative pl-6">
-                                    <div className="absolute -left-[31px] top-0 w-6 h-6 rounded-full bg-white border-4 border-teal-600 flex items-center justify-center text-[8px] text-teal-600">
-                                        {getEventIcon(event.action)}
-                                    </div>
-                                    <div className="flex justify-between items-start mb-1">
-                                        <div className="font-bold text-gray-800">{event.action}</div>
-                                        <div className="text-xs text-gray-400 flex items-center gap-1">
-                                            <Calendar size={10}/> {new Date(event.date).toLocaleString()}
-                                        </div>
-                                    </div>
-                                    <div className="text-sm bg-gray-50 p-3 rounded border border-gray-100 text-gray-600">
-                                        <p>{mainDesc}</p>
-                                        
-                                        {materials && (
-                                            <div className="mt-3 pt-3 border-t border-gray-200 text-xs bg-white p-2 rounded">
-                                                <div className="font-bold text-teal-700 mb-1 flex items-center gap-1"><Layers size={10}/> Insumos Estimados:</div>
-                                                <pre className="whitespace-pre-wrap font-sans text-gray-500">{materials}</pre>
-                                            </div>
-                                        )}
-                                        
-                                        <div className="mt-2 text-xs text-gray-400 font-medium flex items-center gap-1">
-                                            Responsável: <span className="text-gray-600 font-bold">{event.user}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                             );
-                         })}
-                         {(selectedStockOp.events || []).length === 0 && (
-                             <p className="text-center text-gray-400 italic">Sem histórico registrado.</p>
-                         )}
-                     </div>
-                 </div>
-             </div>
-        </div>
-      )}
     </div>
   );
 };

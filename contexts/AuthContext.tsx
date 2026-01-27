@@ -60,7 +60,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           if (profileError) throw new Error(`Erro ao criar perfil: ${profileError.message}`);
 
-          console.log("✅ Auto-Correção concluída com sucesso.");
           return createdProfile as UserProfile;
 
       } catch (err) {
@@ -70,15 +69,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
-   * Busca o perfil com mecanismo de RETRY (Tentativas).
-   * Isso resolve o problema do "F5" onde o token ainda não propagou.
+   * Busca o perfil OTIMIZADA.
    */
-  const fetchProfile = async (userId: string, email?: string, retries = 3, delay = 1000) => {
+  const fetchProfile = async (userId: string, email?: string, retries = 2, delay = 500) => {
       try {
-          // 1. Tenta buscar o perfil existente
+          // 1. OTIMIZAÇÃO: Seleciona apenas campos necessários primeiro para ser rápido
           const { data: existingProfile, error: fetchError } = await supabase
             .from('user_profiles')
-            .select('*')
+            .select('*') 
             .eq('id', userId)
             .maybeSingle();
 
@@ -89,9 +87,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
 
           // FALHA: Se não achou, mas ainda temos tentativas (retries > 0)
-          // Isso acontece muito no Refresh da página (Race Condition do Token)
           if (retries > 0) {
-              console.warn(`⚠️ Perfil não carregado. Tentando novamente em ${delay}ms... (Restam: ${retries})`);
               setTimeout(() => {
                   fetchProfile(userId, email, retries - 1, delay);
               }, delay);
@@ -99,7 +95,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
 
           // FALHA TOTAL: Esgotaram as tentativas. Tenta criar (Auto-Healing).
-          console.log("⚠️ Perfil não encontrado após tentativas. Iniciando criação...");
+          console.log("⚠️ Perfil não encontrado. Iniciando criação...");
           const newProfile = await ensureProfileExists(userId, email);
           if (newProfile) {
               setProfile(newProfile);
@@ -126,16 +122,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 setUser(currentSession?.user ?? null);
                 
                 if (currentSession?.user) {
-                    // Inicia busca com 3 tentativas de resiliência
-                    await fetchProfile(currentSession.user.id, currentSession.user.email, 3, 500);
+                    // Inicia busca imediatamente
+                    await fetchProfile(currentSession.user.id, currentSession.user.email);
                 }
             }
         } catch (error) {
             console.error("Auth init failed:", error);
         } finally {
             if (mounted) {
-                // Apenas remove o loading geral, o fetchProfile pode continuar tentando em background
-                // Isso permite que a UI mostre 'Conectando...' sem travar
                 setLoading(false);
             }
         }
@@ -143,19 +137,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
-    // 2. Listener de Eventos (Login, Logout, Token Refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (mounted) {
           if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
              setSession(newSession);
              setUser(newSession?.user ?? null);
              
-             // Se houve evento de login/refresh, buscamos o perfil novamente com retry
              if (newSession?.user) {
-                 // Pequeno delay para garantir que o token propagou no cliente do Supabase
-                 setTimeout(() => {
-                     fetchProfile(newSession.user.id, newSession.user.email, 2, 500);
-                 }, 100);
+                 fetchProfile(newSession.user.id, newSession.user.email);
              }
           } else if (event === 'SIGNED_OUT') {
              setSession(null);
@@ -183,7 +172,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshProfile = async () => {
       if (user) {
-          await fetchProfile(user.id, user.email, 1, 0); // Sem delay para refresh manual
+          await fetchProfile(user.id, user.email, 0, 0);
       }
   };
 

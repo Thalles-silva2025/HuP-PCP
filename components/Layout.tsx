@@ -24,10 +24,12 @@ import {
   LogOut,
   User as UserIcon,
   CreditCard,
-  Sliders // New Icon for Configuration
+  Sliders,
+  ShoppingCart // New Icon
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { DataPrefetcher } from './DataPrefetcher'; 
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -107,7 +109,6 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
-  // Fecha o menu de usuário ao clicar fora
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
         if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
@@ -130,7 +131,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
   const menuItems: MenuItemDef[] = [
     { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
     { icon: Target, label: 'Metas de Produção', path: '/goals' },
-    { icon: Database, label: 'Cadastros Gerais', path: '/settings' }, // Renamed from "Cadastros" to be clearer
+    { icon: Database, label: 'Cadastros Gerais', path: '/settings' },
     { icon: Shirt, label: 'Fichas Técnicas', path: '/tech-packs' },
     { icon: Layers, label: 'Ordens de Produção', path: '/ops' },
     { icon: Scissors, label: 'Sala de Corte', path: '/cutting' },
@@ -138,13 +139,14 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     { icon: ClipboardCheck, label: 'Revisão / Qualidade', path: '/revision' },
     { icon: PackageCheck, label: 'Embalagem', path: '/packing' },
     { icon: Package, label: 'Estoque Acabado', path: '/inventory' },
+    // NOVO MÓDULO INSERIDO AQUI
+    { icon: ShoppingCart, label: 'Compras', path: '/purchasing' },
     { icon: FileText, label: 'Soma de Matéria Prima', path: '/consolidation' },
     { icon: DollarSign, label: 'Pagamentos', path: '/payments' },
     { icon: BarChart3, label: 'Relatórios', path: '/reports' },
-    { icon: Sliders, label: 'Configurações', path: '/configuration' }, // New Module
+    { icon: Sliders, label: 'Configurações', path: '/configuration' },
   ];
 
-  // Helper para obter iniciais
   const getInitials = (name?: string) => {
       if(!name) return 'U';
       const parts = name.split(' ');
@@ -157,7 +159,8 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   return (
     <div className="flex h-screen bg-gray-100 overflow-hidden">
-      {/* Sidebar Desktop - Hover Effect */}
+      <DataPrefetcher />
+
       <aside 
         className={`hidden md:flex flex-col bg-slate-900 text-white transition-all duration-300 ease-in-out z-20
           ${collapsed ? 'w-20' : 'w-64'}
@@ -188,10 +191,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           ))}
         </nav>
 
-        {/* User Footer with Popover Menu */}
         <div className="p-4 border-t border-slate-800 relative" ref={userMenuRef}>
-          
-          {/* Menu Popover */}
           {userMenuOpen && !collapsed && (
               <div className="absolute bottom-full left-4 right-4 mb-2 bg-slate-800 rounded-lg shadow-xl border border-slate-700 overflow-hidden animate-fade-in">
                   <Link to="/profile" className="flex items-center gap-3 p-3 hover:bg-slate-700 text-sm text-slate-200 transition-colors">
@@ -223,9 +223,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header Mobile */}
         <header className="md:hidden bg-white h-16 border-b flex items-center justify-between px-4 no-print shrink-0">
           <div className="font-bold text-xl text-blue-600">B-HUB</div>
           <button onClick={() => setMobileOpen(true)}>
@@ -233,7 +231,6 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           </button>
         </header>
 
-        {/* Mobile Sidebar Overlay */}
         {mobileOpen && (
           <div className="fixed inset-0 z-50 flex">
             <div 
