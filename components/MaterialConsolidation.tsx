@@ -39,8 +39,6 @@ export const MaterialConsolidation: React.FC = () => {
   }, [allOps]);
 
   const toggleOp = (id: string) => {
-    setSelectedOpIds] = useState<string[]>([]); // This was likely a copy paste error in my internal representation or just skipping. 
-    // Wait, the toggleOp implementation was:
     setSelectedOpIds(prev => 
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     );

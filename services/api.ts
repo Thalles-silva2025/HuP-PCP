@@ -11,19 +11,32 @@ import {
 
 // ... (helper functions getOrgId, getCurrentUserName remain unchanged)
 const getOrgId = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Sessão expirada. Recarregue a página.');
-  
-  let { data: profile } = await supabase.from('user_profiles').select('organization_id').eq('id', user.id).maybeSingle();
-  
-  if (!profile || !profile.organization_id) {
-      const { data: newOrg } = await supabase.from('organizations').insert([{ name: 'Minha Confecção' }]).select('id').single();
-      if(newOrg) {
-          await supabase.from('user_profiles').upsert({ id: user.id, organization_id: newOrg.id, role: 'admin' });
-          return newOrg.id;
-      }
+  try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError) throw authError;
+    if (!user) throw new Error('Sessão expirada. Recarregue a página.');
+    
+    let { data: profile, error: profileError } = await supabase.from('user_profiles').select('organization_id').eq('id', user.id).maybeSingle();
+    
+    if (profileError) throw profileError;
+
+    if (!profile || !profile.organization_id) {
+        const { data: newOrg, error: orgError } = await supabase.from('organizations').insert([{ name: 'Minha Confecção' }]).select('id').single();
+        if (orgError) throw orgError;
+        
+        if(newOrg) {
+            await supabase.from('user_profiles').upsert({ id: user.id, organization_id: newOrg.id, role: 'admin' });
+            return newOrg.id;
+        }
+    }
+    return profile.organization_id;
+  } catch (error: any) {
+    console.error("API Context Error:", error);
+    if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+        throw new Error('Erro de conexão. Verifique sua internet ou contate o suporte.');
+    }
+    throw error;
   }
-  return profile.organization_id;
 };
 
 const getCurrentUserName = async () => {
@@ -126,7 +139,8 @@ export const ApiService = {
 
   getProductionOrders: async () => { 
       await getOrgId(); 
-      const { data } = await supabase.from('production_orders').select('*'); 
+      const { data, error } = await supabase.from('production_orders').select('*'); 
+      if (error) throw error;
       return (data || []).map(mapOpFromDB); 
   },
 
@@ -211,7 +225,8 @@ export const ApiService = {
 
   getSubcontractorOrders: async () => { 
       await getOrgId(); 
-      const { data } = await supabase.from('subcontractor_orders').select('*'); 
+      const { data, error } = await supabase.from('subcontractor_orders').select('*'); 
+      if (error) throw error;
       return (data || []).map(mapOsfFromDB); 
   },
 
@@ -358,8 +373,6 @@ export const ApiService = {
       if (fetchError) throw fetchError;
 
       // 2. CHECKPOINT 3: VERIFICAR SE JÁ EXISTE REVISÃO
-      // Se a OP já foi conferida (aprovada/rejeitada) no módulo de Revisão, não podemos estornar a facção
-      // pois isso quebraria a integridade do estoque e dos dados.
       if (osf && osf.op_id) {
           const { data: op } = await supabase
               .from('production_orders')
@@ -429,7 +442,8 @@ export const ApiService = {
   getFinishedGoods: async () => { 
       await getOrgId(); 
       // Busca todas as entradas de produtos acabados (vindas da Embalagem)
-      const { data } = await supabase.from('finished_goods').select('*'); 
+      const { data, error } = await supabase.from('finished_goods').select('*'); 
+      if (error) throw error;
       return (data || []).map((item: any) => ({
           ...item,
           opId: item.op_id,
@@ -441,7 +455,8 @@ export const ApiService = {
   // NEW: Busca as saídas/exportações
   getInventoryExports: async () => {
       await getOrgId();
-      const { data } = await supabase.from('inventory_exports').select('*');
+      const { data, error } = await supabase.from('inventory_exports').select('*');
+      if (error) throw error;
       return data || [];
   },
 
@@ -497,7 +512,8 @@ export const ApiService = {
   // --- Products & Tech Packs ---
   getProducts: async () => { 
       await getOrgId(); 
-      const { data } = await supabase.from('products').select('*, tech_packs(*)'); 
+      const { data, error } = await supabase.from('products').select('*, tech_packs(*)'); 
+      if (error) throw error;
       return (data || []).map((p: any) => ({
         ...p,
         imageUrl: p.image_url,
@@ -526,9 +542,11 @@ export const ApiService = {
 
   getProductsLite: async () => {
       await getOrgId();
-      const { data } = await supabase
+      const { data, error } = await supabase
           .from('products')
           .select('id, sku, name, collection, image_url, sizes, colors, status, tech_packs(id, version, status, is_frozen, active_sizes, total_cost)');
+      
+      if (error) throw error;
       
       return (data || []).map((p: any) => ({
           ...p,
@@ -641,7 +659,8 @@ export const ApiService = {
 
   getMaterials: async () => { 
       await getOrgId(); 
-      const { data } = await supabase.from('materials').select('*'); 
+      const { data, error } = await supabase.from('materials').select('*'); 
+      if (error) throw error;
       return (data || []).map((m: any) => ({ 
           ...m, 
           costUnit: m.cost_unit, 
@@ -685,7 +704,8 @@ export const ApiService = {
 
   getPayments: async () => { 
       await getOrgId(); 
-      const { data } = await supabase.from('payments').select('*'); 
+      const { data, error } = await supabase.from('payments').select('*'); 
+      if (error) throw error;
       return (data || []).map((p: any) => ({
           ...p,
           opId: p.op_id,

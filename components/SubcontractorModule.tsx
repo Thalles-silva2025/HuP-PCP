@@ -55,7 +55,7 @@ export const SubcontractorModule: React.FC = () => {
   const { data: ops = [], isLoading: loadingOps } = useQuery({
       queryKey: ['productionOrders'],
       queryFn: ApiService.getProductionOrders,
-      staleTime: 1000 * 60 * 5 // 5 min cache
+      staleTime: 1000 * 60 * 2 // Cache reduzido para 2 min para pegar atualizações do corte rápido
   });
 
   const { data: osfs = [], isLoading: loadingOsfs } = useQuery({
@@ -95,14 +95,19 @@ export const SubcontractorModule: React.FC = () => {
       return productId;
   };
 
+  // FIX: Accurate Ready to Ship Calculation using Granular Subtraction
   const readyToShipOps = useMemo(() => {
       return ops.filter(op => {
           if (op.status === OrderStatus.COMPLETED || op.status === OrderStatus.CANCELLED || op.status === OrderStatus.DRAFT) return false;
 
-          const totalCut = op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
+          // Check against the updated REAL total (from Cutting)
+          const totalCut = op.quantityTotal; 
+          
+          // Sum all previously sent items for this OP (excluding Reworks to avoid double counting logic)
           const opOsfs = osfs.filter(osf => osf.opId === op.id && osf.type !== 'Retrabalho');
           const totalSent = opOsfs.reduce((acc, osf) => acc + (Number(osf.sentQuantity) || 0), 0);
           
+          // Show if we have more cut pieces than sent pieces
           return totalCut > totalSent;
       });
   }, [ops, osfs]);
@@ -111,7 +116,6 @@ export const SubcontractorModule: React.FC = () => {
       const allActive = osfs.filter(o => !isStatusCompleted(o.status));
       const allHistory = osfs.filter(o => isStatusCompleted(o.status));
       
-      // Calculate Late: Active AND DueDate passed
       const today = new Date();
       today.setHours(0,0,0,0);
       
@@ -125,7 +129,7 @@ export const SubcontractorModule: React.FC = () => {
       return {
           total: osfs.length,
           awaiting: readyToShipOps.length,
-          sent: allActive.filter(o => o.status === 'Enviado' || o.status === 'Parcial').length, // Now includes Partial in "Na Rua" logic concept
+          sent: allActive.filter(o => o.status === 'Enviado' || o.status === 'Parcial').length,
           partial: allActive.filter(o => o.status === 'Parcial').length,
           completed: allHistory.length,
           late: late.length
@@ -138,7 +142,6 @@ export const SubcontractorModule: React.FC = () => {
       today.setHours(0,0,0,0);
 
       if (activeFilter === 'SENT') {
-          // "Na Rua" = Enviado OR Parcial (Anything active outside)
           list = list.filter(o => (o.status === 'Enviado' || o.status === 'Parcial') && !isStatusCompleted(o.status));
       } else if (activeFilter === 'PARTIAL') {
           list = list.filter(o => o.status === 'Parcial');
@@ -152,13 +155,9 @@ export const SubcontractorModule: React.FC = () => {
               return !isStatusCompleted(osf.status) && due < today;
           });
       } else {
-          // ALL active (default view)
           list = list.filter(o => !isStatusCompleted(o.status));
       }
       
-      // ORDERING LOGIC:
-      // If completed, sort by Return Date (Most recent first)
-      // If active, sort by Sent Date (Most recent first)
       return list.sort((a,b) => {
           const dateA = isStatusCompleted(a.status) ? (a.returnDate || a.sentDate) : a.sentDate;
           const dateB = isStatusCompleted(b.status) ? (b.returnDate || b.sentDate) : b.sentDate;
@@ -166,40 +165,43 @@ export const SubcontractorModule: React.FC = () => {
       });
   }, [osfs, activeFilter, ops]);
 
-  // --- ACTIONS ---
-
+  // --- CRITICAL FIX: ACCURATE AVAILABLE ITEMS CALCULATION ---
   const getAvailableItemsForOp = (op: ProductionOrder) => {
-      let sourceItems: ProductionOrderItem[] = [];
-      if (op.cuttingDetails?.jobs && op.cuttingDetails.jobs.length > 0) {
-          const gradeMap: Record<string, Record<string, number>> = {};
-          op.cuttingDetails.jobs.forEach(job => {
-              job.layers.forEach(layer => {
-                  if (!gradeMap[layer.color]) gradeMap[layer.color] = {};
-                  job.matrix.forEach(ratio => {
-                      gradeMap[layer.color][ratio.size] = (gradeMap[layer.color][ratio.size] || 0) + (layer.layers * ratio.ratio);
-                  });
-              });
-          });
-          Object.entries(gradeMap).forEach(([color, sizes]) => {
-              Object.entries(sizes).forEach(([size, qty]) => {
-                  if (qty > 0) sourceItems.push({ color, size, quantity: qty });
-              });
-          });
-      } else {
-          sourceItems = op.items;
-      }
+      // 1. Source of Truth: The Updated Grid from Cutting (op.items)
+      // This grid contains the ACTUAL cut quantities, including overproduction.
+      const sourceItems = op.items || [];
 
-      const opOsfs = osfs.filter(osf => osf.opId === op.id);
-      const totalCut = sourceItems.reduce((a,b) => a+b.quantity, 0);
-      const totalSent = opOsfs.reduce((acc, osf) => acc + (Number(osf.sentQuantity) || 0), 0);
-      const remainingQty = Math.max(0, totalCut - totalSent);
+      // 2. Calculate what was ALREADY sent in previous OSFs
+      const opOsfs = osfs.filter(osf => osf.opId === op.id && osf.type !== 'Retrabalho');
       
-      const ratio = totalCut > 0 ? remainingQty / totalCut : 0;
+      // Map: "Color###Size" -> Quantity Sent
+      const sentMap: Record<string, number> = {};
+      
+      opOsfs.forEach(osf => {
+          const snapshot = osf.itemsSnapshot || [];
+          snapshot.forEach((item: any) => {
+              const key = `${item.color}###${item.size}`;
+              sentMap[key] = (sentMap[key] || 0) + (item.quantity || 0);
+          });
+      });
 
-      const itemsToSend = sourceItems.map(i => ({
-          ...i,
-          quantity: Math.ceil(i.quantity * ratio)
-      })).filter(i => i.quantity > 0);
+      // 3. Calculate Remaining (Available) Items
+      // Logic: Real Cut - Already Sent = Available to Send
+      const itemsToSend = sourceItems.map(item => {
+          const key = `${item.color}###${item.size}`;
+          const sentQty = sentMap[key] || 0;
+          const remaining = Math.max(0, item.quantity - sentQty);
+          
+          return {
+              ...item,
+              quantity: remaining
+          };
+      }).filter(i => i.quantity > 0); // Remove items with 0 remaining
+
+      // 4. Totals for UI
+      const totalCut = sourceItems.reduce((a,b) => a + b.quantity, 0);
+      const totalSent = opOsfs.reduce((acc, osf) => acc + (Number(osf.sentQuantity) || 0), 0);
+      const remainingQty = itemsToSend.reduce((a,b) => a + b.quantity, 0);
 
       return { itemsToSend, remainingQty, totalCut, totalSent };
   };
@@ -207,7 +209,14 @@ export const SubcontractorModule: React.FC = () => {
   const handleOpenRemessa = (op: ProductionOrder) => {
       const prod = products.find(p => p.id === op.productId);
       const tp = prod?.techPacks.find(t => t.version === op.techPackVersion) || prod?.techPacks[0]; 
+      
+      // Use the corrected function to get items
       const { itemsToSend, remainingQty } = getAvailableItemsForOp(op);
+
+      if (remainingQty <= 0) {
+          addToast({ type: 'warning', title: 'Sem Saldo', message: 'Não há itens pendentes para envio nesta OP.' });
+          return;
+      }
 
       const qtyByColor: Record<string, number> = {};
       itemsToSend.forEach(i => {
@@ -321,7 +330,6 @@ export const SubcontractorModule: React.FC = () => {
           return;
       }
 
-      // Validação de Recebimento
       const currentTotal = returnItems.reduce((a,b) => a+b.quantity, 0);
       const alreadyReceived = selectedOsfForReturn.receivedQuantity || 0;
       const sent = selectedOsfForReturn.sentQuantity;
@@ -399,7 +407,6 @@ export const SubcontractorModule: React.FC = () => {
       }
   };
 
-  // --- HELPER: RENDER MATRIX GRID FOR REMESSA ---
   const renderRemessaGrid = (items: ProductionOrderItem[]) => {
       const sizes = Array.from(new Set(items.map(i => i.size))).sort(sortSizes);
       const colors = Array.from(new Set(items.map(i => i.color))).sort();
@@ -441,13 +448,12 @@ export const SubcontractorModule: React.FC = () => {
       );
   };
 
-  // --- 1. NEW: RENDER REFERENCE GRID (READ-ONLY) FOR RETURN ---
   const renderReferenceSnapshotGrid = () => {
       if (!selectedOsfForReturn || !selectedOsfForReturn.itemsSnapshot) return null;
       
-      const items = selectedOsfForReturn.itemsSnapshot;
-      const sizes = Array.from(new Set(items.map((i: any) => i.size))).sort(sortSizes);
-      const colors: string[] = Array.from(new Set(items.map((i: any) => i.color as string))).sort();
+      const items = selectedOsfForReturn.itemsSnapshot || [];
+      const sizes = Array.from(new Set(items.map((i: any) => String(i.size)))).sort(sortSizes);
+      const colors: string[] = Array.from(new Set(items.map((i: any) => String(i.color)))).sort();
 
       return (
           <div className="border border-gray-200 rounded-lg overflow-hidden bg-white mb-6">
@@ -490,12 +496,10 @@ export const SubcontractorModule: React.FC = () => {
       );
   };
 
-  // --- 3. HELPER: RENDER MATRIX GRID FOR RECEIVING ---
   const renderReceivingMatrix = () => {
       if (!selectedOsfForReturn) return null;
       
       const itemsSnapshot = selectedOsfForReturn.itemsSnapshot || [];
-      // Dados já retornados anteriormente (Acumulado)
       const prevReturnedItems = selectedOsfForReturn.itemsReturned || [];
 
       const sizes = Array.from(new Set(itemsSnapshot.map((i: any) => i.size))).sort(sortSizes);
@@ -521,18 +525,12 @@ export const SubcontractorModule: React.FC = () => {
                                       {color}
                                   </td>
                                   {sizes.map(size => {
-                                      // Quanto foi enviado
                                       const plannedItem = itemsSnapshot.find((i: any) => i.color === color && i.size === size);
                                       const totalSent = plannedItem?.quantity || 0;
-                                      
-                                      // Quanto já foi devolvido ANTES
                                       const prevReturned = prevReturnedItems.find((i: any) => i.color === color && i.size === size)?.quantity || 0;
-                                      
-                                      // Quanto resta receber
                                       const remainingToReceive = Math.max(0, totalSent - prevReturned);
                                       const isFullyReceived = remainingToReceive === 0;
 
-                                      // Input atual (Sessão atual)
                                       const currentItem = returnItems.find(i => i.color === color && i.size === size);
                                       const currentVal = currentItem?.quantity || 0;
                                       rowReceivedTotal += currentVal;
@@ -543,7 +541,7 @@ export const SubcontractorModule: React.FC = () => {
                                                   <div className="relative group">
                                                       <input 
                                                           type="number"
-                                                          disabled={isFullyReceived} // Bloqueia se já completou
+                                                          disabled={isFullyReceived}
                                                           className={`w-full text-center font-bold border rounded p-2 outline-none transition-colors text-base
                                                               ${currentVal > remainingToReceive ? 'bg-red-50 border-red-300 text-red-600' : 
                                                                 isFullyReceived ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 
@@ -573,7 +571,6 @@ export const SubcontractorModule: React.FC = () => {
       );
   };
 
-  // --- PRINT SHEET RENDERER ---
   const renderPrintSheet = () => {
       if (!selectedOsfForView) return null;
       const op = ops.find(o => o.id === selectedOsfForView.opId);
@@ -582,22 +579,16 @@ export const SubcontractorModule: React.FC = () => {
       
       const safeItems = osf.itemsSnapshot || [];
       const safeMaterials = osf.materialsSnapshot || [];
-
-      // SORTING
-      const sizes = Array.from(new Set(safeItems.map(i => i.size))).sort(sortSizes);
-      const colors = Array.from(new Set(safeItems.map(i => i.color))).sort();
-
-      // LOGIC FOR REWORK LOGS
+      const sizes = Array.from(new Set(safeItems.map((i: any) => String(i.size)))).sort(sortSizes);
+      const colors = Array.from(new Set(safeItems.map((i: any) => String(i.color)))).sort();
       const reworkEvents = (op?.events || []).filter(e => e.action.toLowerCase().includes('retrabalho') || e.action.toLowerCase().includes('reprovado') || e.type === 'alert');
 
       return (
           <div className="bg-white p-8 w-[210mm] min-h-[297mm] mx-auto shadow-2xl printable-sheet text-gray-900 relative font-sans text-xs">
-              {/* HEADER */}
+              {/* (Header omitted for brevity, keeping same structure) */}
               <div className="flex justify-between items-start border-b-2 border-gray-800 pb-4 mb-6">
                   <div className="flex flex-col">
-                      <h1 className="text-2xl font-extrabold uppercase tracking-tight text-gray-900">
-                          Ficha de Produção
-                      </h1>
+                      <h1 className="text-2xl font-extrabold uppercase tracking-tight text-gray-900">Ficha de Produção</h1>
                       <div className="text-gray-500 font-bold uppercase mt-1">OSF #{osf.id.split('-')[0]}</div>
                   </div>
                   <div className="text-right">
@@ -631,7 +622,6 @@ export const SubcontractorModule: React.FC = () => {
                   </div>
               </div>
 
-              {/* MATRIX GRADE (NEW) */}
               <div className="mb-8">
                   <h3 className="font-bold text-gray-800 border-b-2 border-gray-800 mb-2 pb-1 flex items-center gap-2 uppercase">
                       <LayoutList size={14}/> Grade de Envio (Matriz)
@@ -682,7 +672,7 @@ export const SubcontractorModule: React.FC = () => {
                   </div>
               </div>
 
-              {/* MATERIALS - UPDATED VISUALIZATION FOR COLORS */}
+              {/* MATERIALS */}
               <div className="mb-6">
                   <h3 className="font-bold text-gray-800 border-b-2 border-gray-800 mb-2 pb-1 flex items-center gap-2 uppercase">
                       <Factory size={14}/> Aviamentos & Insumos Enviados
@@ -733,7 +723,7 @@ export const SubcontractorModule: React.FC = () => {
                   </div>
               </div>
 
-              {/* NEW: REWORK LOGS */}
+              {/* REWORK LOGS */}
               {reworkEvents.length > 0 && (
                   <div className="mb-8 mt-4">
                       <h3 className="font-bold text-red-800 border-b-2 border-red-800 mb-2 pb-1 flex items-center gap-2 uppercase text-xs">
@@ -792,61 +782,39 @@ export const SubcontractorModule: React.FC = () => {
         </div>
       </div>
 
-      {/* KPI DASHBOARD (Clickable Filters) */}
+      {/* KPI DASHBOARD */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          <div 
-            onClick={() => setActiveFilter('ALL')}
-            className={`bg-white p-4 rounded-xl border shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'ALL' ? 'ring-2 ring-gray-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('ALL')} className={`bg-white p-4 rounded-xl border shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'ALL' ? 'ring-2 ring-gray-400' : ''}`}>
               <div className="text-xs font-bold text-gray-500 uppercase">Total Histórico</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.total}</div>
           </div>
-          <div 
-            onClick={() => setActiveFilter('WAITING')}
-            className={`bg-white p-4 rounded-xl border border-orange-200 border-l-4 border-l-orange-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'WAITING' ? 'ring-2 ring-orange-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('WAITING')} className={`bg-white p-4 rounded-xl border border-orange-200 border-l-4 border-l-orange-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'WAITING' ? 'ring-2 ring-orange-400' : ''}`}>
               <div className="text-xs font-bold text-orange-600 uppercase">Aguardando Envio</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.awaiting}</div>
           </div>
-          <div 
-            onClick={() => setActiveFilter('SENT')}
-            className={`bg-white p-4 rounded-xl border border-blue-200 border-l-4 border-l-blue-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'SENT' ? 'ring-2 ring-blue-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('SENT')} className={`bg-white p-4 rounded-xl border border-blue-200 border-l-4 border-l-blue-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'SENT' ? 'ring-2 ring-blue-400' : ''}`}>
               <div className="text-xs font-bold text-blue-600 uppercase">Na Rua (Ativo)</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.sent}</div>
           </div>
-          <div 
-            onClick={() => setActiveFilter('PARTIAL')}
-            className={`bg-white p-4 rounded-xl border border-yellow-200 border-l-4 border-l-yellow-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'PARTIAL' ? 'ring-2 ring-yellow-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('PARTIAL')} className={`bg-white p-4 rounded-xl border border-yellow-200 border-l-4 border-l-yellow-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'PARTIAL' ? 'ring-2 ring-yellow-400' : ''}`}>
               <div className="text-xs font-bold text-yellow-600 uppercase">Retorno Parcial</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.partial}</div>
           </div>
-          <div 
-            onClick={() => setActiveFilter('LATE')}
-            className={`bg-white p-4 rounded-xl border border-red-200 border-l-4 border-l-red-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'LATE' ? 'ring-2 ring-red-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('LATE')} className={`bg-white p-4 rounded-xl border border-red-200 border-l-4 border-l-red-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'LATE' ? 'ring-2 ring-red-400' : ''}`}>
               <div className="text-xs font-bold text-red-600 uppercase">Atrasados</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.late}</div>
           </div>
-          <div 
-            onClick={() => setActiveFilter('COMPLETED')}
-            className={`bg-white p-4 rounded-xl border border-green-200 border-l-4 border-l-green-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'COMPLETED' ? 'ring-2 ring-green-400' : ''}`}
-          >
+          <div onClick={() => setActiveFilter('COMPLETED')} className={`bg-white p-4 rounded-xl border border-green-200 border-l-4 border-l-green-500 shadow-sm cursor-pointer transition-all hover:shadow-md ${activeFilter === 'COMPLETED' ? 'ring-2 ring-green-400' : ''}`}>
               <div className="text-xs font-bold text-green-600 uppercase">Concluídos</div>
               <div className="text-2xl font-bold text-gray-900 mt-1">{stats.completed}</div>
           </div>
       </div>
 
-      {/* FILTER INDICATOR */}
       {activeFilter !== 'ALL' && (
           <div className="flex items-center gap-2 text-sm text-gray-600">
               <Filter size={16}/> Filtro Ativo: 
               <span className="font-bold bg-gray-200 px-2 py-0.5 rounded text-gray-800">
-                  {activeFilter === 'WAITING' ? 'Aguardando Envio' : 
-                   activeFilter === 'SENT' ? 'Na Rua (Ativo)' :
-                   activeFilter === 'PARTIAL' ? 'Parcial' : 
-                   activeFilter === 'LATE' ? 'Atrasados' : 'Concluídos'}
+                  {activeFilter === 'WAITING' ? 'Aguardando Envio' : activeFilter === 'SENT' ? 'Na Rua (Ativo)' : activeFilter === 'PARTIAL' ? 'Parcial' : activeFilter === 'LATE' ? 'Atrasados' : 'Concluídos'}
               </span>
               <button onClick={() => setActiveFilter('ALL')} className="text-xs text-blue-600 hover:underline ml-2">Limpar Filtro</button>
           </div>
@@ -866,13 +834,13 @@ export const SubcontractorModule: React.FC = () => {
                               <th className="p-4">Data</th>
                               <th className="p-4">Lote</th>
                               <th className="p-4">Produto</th>
-                              <th className="p-4">Qtd</th>
+                              <th className="p-4">Qtd (Real)</th>
                               <th className="p-4 text-right">Ação</th>
                           </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                           {readyToShipOps.map(op => {
-                              const totalCut = op.cuttingDetails?.jobs?.reduce((acc, job) => acc + job.totalPieces, 0) || 0;
+                              const totalCut = op.quantityTotal;
                               return (
                                   <tr key={op.id} className="hover:bg-orange-50/30">
                                       <td className="p-4 text-gray-500">{new Date(op.createdAt).toLocaleDateString()}</td>
@@ -909,11 +877,10 @@ export const SubcontractorModule: React.FC = () => {
                   {displayedOsfs.map(osf => {
                       const op = ops.find(o => o.id === osf.opId);
                       const prodName = getProductDisplayName(op?.productId || '');
-                      const opLot = op?.lotNumber || 'N/A'; // 1. REQUEST: ADD OP NUMBER
+                      const opLot = op?.lotNumber || 'N/A';
                       const isCompleted = isStatusCompleted(osf.status);
                       const isSent = osf.status === 'Enviado';
 
-                      // Date / Deadline Logic (New Feature)
                       let deadlineTag = null;
                       if (!isCompleted && op?.dueDate) {
                           const today = new Date();
@@ -937,88 +904,31 @@ export const SubcontractorModule: React.FC = () => {
                           <div key={osf.id} className={`bg-white p-5 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col justify-between h-full ${isCompleted ? 'opacity-80' : ''}`}>
                               <div>
                                   <div className="flex justify-between items-start mb-3">
-                                      <span className="text-[10px] font-bold bg-blue-50 text-blue-600 px-2 py-1 rounded uppercase border border-blue-100">
-                                          {osf.type}
-                                      </span>
-                                      <div className="flex flex-col items-end gap-1">
-                                          <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase border ${isCompleted ? 'bg-gray-100 text-gray-600 border-gray-200' : 'bg-green-50 text-green-600 border-green-100'}`}>
-                                              {osf.status}
-                                          </span>
-                                      </div>
+                                      <span className="text-[10px] font-bold bg-blue-50 text-blue-600 px-2 py-1 rounded uppercase border border-blue-100">{osf.type}</span>
+                                      <div className="flex flex-col items-end gap-1"><span className={`text-[10px] font-bold px-2 py-1 rounded uppercase border ${isCompleted ? 'bg-gray-100 text-gray-600 border-gray-200' : 'bg-green-50 text-green-600 border-green-100'}`}>{osf.status}</span></div>
                                   </div>
-                                  
                                   {deadlineTag && <div className="mb-2 text-right">{deadlineTag}</div>}
-
-                                  <div className="flex items-center justify-between mb-1">
-                                      <h4 className="font-bold text-gray-800">{osf.subcontractorName}</h4>
-                                      <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded font-mono font-bold">OP: {opLot}</span>
-                                  </div>
+                                  <div className="flex items-center justify-between mb-1"><h4 className="font-bold text-gray-800">{osf.subcontractorName}</h4><span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded font-mono font-bold">OP: {opLot}</span></div>
                                   <p className="text-xs text-gray-500 mb-4 uppercase font-medium">{prodName}</p>
-                                  
-                                  <div className="flex justify-between text-xs text-gray-500 font-bold mb-4 pt-4 border-t border-gray-100">
-                                      <div className="text-center">
-                                          <div className="text-[10px] uppercase text-gray-400 mb-1">Enviado</div>
-                                          <div className="text-lg text-gray-800">{osf.sentQuantity}</div>
-                                      </div>
-                                      <div className="text-center">
-                                          <div className="text-[10px] uppercase text-gray-400 mb-1">Recebido</div>
-                                          <div className={`text-lg ${osf.receivedQuantity < osf.sentQuantity ? 'text-yellow-600' : 'text-green-600'}`}>
-                                              {osf.receivedQuantity}
-                                          </div>
-                                      </div>
-                                  </div>
+                                  <div className="flex justify-between text-xs text-gray-500 font-bold mb-4 pt-4 border-t border-gray-100"><div className="text-center"><div className="text-[10px] uppercase text-gray-400 mb-1">Enviado</div><div className="text-lg text-gray-800">{osf.sentQuantity}</div></div><div className="text-center"><div className="text-[10px] uppercase text-gray-400 mb-1">Recebido</div><div className={`text-lg ${osf.receivedQuantity < osf.sentQuantity ? 'text-yellow-600' : 'text-green-600'}`}>{osf.receivedQuantity}</div></div></div>
                               </div>
-                              
                               <div className="flex gap-2 mt-2">
-                                  <button 
-                                    onClick={() => setSelectedOsfForView(osf)}
-                                    className="flex-1 py-2 border border-gray-300 rounded-lg text-gray-600 text-xs font-bold hover:bg-gray-50"
-                                  >
-                                      Ficha
-                                  </button>
-                                  {!isCompleted && (
-                                      <button 
-                                        onClick={() => handleOpenReturn(osf)}
-                                        className="flex-1 py-2 bg-green-600 text-white rounded-lg text-xs font-bold hover:bg-green-700 flex items-center justify-center gap-1"
-                                      >
-                                          <Undo2 size={12}/> Receber
-                                      </button>
-                                  )}
-                                  
-                                  {/* NOVOS BOTÕES DE ESTORNO */}
-                                  {isSent && (
-                                      <button 
-                                        onClick={() => handleCancelShipment(osf)}
-                                        className="p-2 border border-red-200 text-red-500 rounded-lg hover:bg-red-50"
-                                        title="Cancelar Remessa (Excluir)"
-                                      >
-                                          <Trash2 size={14}/>
-                                      </button>
-                                  )}
-                                  {isCompleted && (
-                                      <button 
-                                        onClick={() => handleRevertReceipt(osf)}
-                                        className="p-2 border border-orange-200 text-orange-500 rounded-lg hover:bg-orange-50"
-                                        title="Estornar Recebimento (Desfazer)"
-                                      >
-                                          <RotateCcw size={14}/>
-                                      </button>
-                                  )}
+                                  <button onClick={() => setSelectedOsfForView(osf)} className="flex-1 py-2 border border-gray-300 rounded-lg text-gray-600 text-xs font-bold hover:bg-gray-50">Ficha</button>
+                                  {!isCompleted && (<button onClick={() => handleOpenReturn(osf)} className="flex-1 py-2 bg-green-600 text-white rounded-lg text-xs font-bold hover:bg-green-700 flex items-center justify-center gap-1"><Undo2 size={12}/> Receber</button>)}
+                                  {isSent && (<button onClick={() => handleCancelShipment(osf)} className="p-2 border border-red-200 text-red-500 rounded-lg hover:bg-red-50" title="Cancelar Remessa (Excluir)"><Trash2 size={14}/></button>)}
+                                  {isCompleted && (<button onClick={() => handleRevertReceipt(osf)} className="p-2 border border-orange-200 text-orange-500 rounded-lg hover:bg-orange-50" title="Estornar Recebimento (Desfazer)"><RotateCcw size={14}/></button>)}
                               </div>
                           </div>
                       );
                   })}
                   {displayedOsfs.length === 0 && (
-                      <div className="col-span-full py-12 bg-gray-50 rounded-xl border border-dashed border-gray-300 text-center text-gray-400">
-                          <Truck size={48} className="mx-auto mb-2 opacity-20"/>
-                          <p>Nenhuma ordem encontrada com este filtro.</p>
-                      </div>
+                      <div className="col-span-full py-12 bg-gray-50 rounded-xl border border-dashed border-gray-300 text-center text-gray-400"><Truck size={48} className="mx-auto mb-2 opacity-20"/><p>Nenhuma ordem encontrada com este filtro.</p></div>
                   )}
               </div>
           </div>
       )}
 
-      {/* REMESSA MODAL - ATUALIZADO COM GRADE MATRIX E TOTAL */}
+      {/* REMESSA MODAL */}
       {selectedOpForRemessa && (
           <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl animate-scale-in flex flex-col max-h-[90vh]">
@@ -1034,7 +944,6 @@ export const SubcontractorModule: React.FC = () => {
                           </div>
                       </div>
 
-                      {/* AREA DE GRADE E QUANTIDADE (NOVO MATRIX) */}
                       <div className="mb-6 border border-orange-200 rounded-lg overflow-hidden">
                           <div className="bg-orange-100 p-4 border-b border-orange-200 flex justify-between items-center">
                               <span className="text-orange-900 font-bold text-sm">Resumo do Envio</span>
@@ -1042,8 +951,6 @@ export const SubcontractorModule: React.FC = () => {
                                   {getAvailableItemsForOp(selectedOpForRemessa).remainingQty} <span className="text-sm font-normal">pçs</span>
                               </span>
                           </div>
-                          
-                          {/* Use Matrix Grid Helper */}
                           <div className="p-4 bg-white">
                               {renderRemessaGrid(getAvailableItemsForOp(selectedOpForRemessa).itemsToSend)}
                           </div>
@@ -1053,12 +960,7 @@ export const SubcontractorModule: React.FC = () => {
                           <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Destino (Facção) <span className="text-red-500">*</span></label>
                               <div className="flex gap-2">
-                                  <select 
-                                    disabled={isInternalProduction}
-                                    className={`flex-1 border rounded p-2 bg-white ${isInternalProduction ? 'bg-gray-100 text-gray-400' : ''}`}
-                                    value={targetPartner}
-                                    onChange={e => setTargetPartner(e.target.value)}
-                                  >
+                                  <select disabled={isInternalProduction} className={`flex-1 border rounded p-2 bg-white ${isInternalProduction ? 'bg-gray-100 text-gray-400' : ''}`} value={targetPartner} onChange={e => setTargetPartner(e.target.value)}>
                                       <option value="">Selecione...</option>
                                       {partners.filter((p: any) => p.type === 'Facção' || p.type === 'Outro').map((p: any) => <option key={p.id} value={p.name}>{p.name}</option>)}
                                   </select>
@@ -1068,17 +970,10 @@ export const SubcontractorModule: React.FC = () => {
                                   </div>
                               </div>
                           </div>
-
                           <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Observações da Remessa</label>
-                              <textarea 
-                                className="w-full border rounded p-2 text-sm h-20" 
-                                placeholder="Instruções específicas para este lote..."
-                                value={remessaObservation}
-                                onChange={e => setRemessaObservation(e.target.value)}
-                              />
+                              <textarea className="w-full border rounded p-2 text-sm h-20" placeholder="Instruções específicas para este lote..." value={remessaObservation} onChange={e => setRemessaObservation(e.target.value)}/>
                           </div>
-
                           <div className="bg-blue-50 p-3 rounded text-sm text-blue-800 border border-blue-100">
                               <div className="font-bold mb-1 flex items-center gap-2"><FileText size={14}/> Resumo Técnico (Automático)</div>
                               <ul className="list-disc pl-4 text-xs space-y-1">
@@ -1100,7 +995,7 @@ export const SubcontractorModule: React.FC = () => {
           </div>
       )}
 
-      {/* PRINT MODAL (FICHA) - ATUALIZADO */}
+      {/* PRINT MODAL */}
       {selectedOsfForView && (
           <div className="fixed inset-0 bg-gray-600/90 z-[60] flex justify-center overflow-y-auto">
               <div className="relative my-8 animate-fade-in">
@@ -1129,33 +1024,24 @@ export const SubcontractorModule: React.FC = () => {
                           <div><div className="text-xs text-gray-500 uppercase font-bold">Data Envio</div><div className="font-bold text-gray-800">{new Date(selectedOsfForReturn.sentDate).toLocaleDateString()}</div></div>
                       </div>
 
-                      {/* 1. NEW: REFERENCE GRID (READ-ONLY) */}
                       {renderReferenceSnapshotGrid()}
 
                       <h4 className="font-bold text-gray-700 mb-2 flex items-center gap-2 mt-6"><Grid3X3 size={16}/> Conferência de Retorno (Entrada)</h4>
                       
-                      {/* 3. REQUEST: MATRIX RECEIVING GRID (WITH PARTIAL LOGIC) */}
                       <div className="mb-6">
                           {renderReceivingMatrix()}
                       </div>
 
                       <div className="mb-4">
                           <label className="block text-sm font-bold text-gray-700 mb-1">Responsável pela Conferência <span className="text-red-500">*</span></label>
-                          <input 
-                            className={`w-full border rounded p-2 ${conferenteError ? 'border-red-500 bg-red-50' : ''}`}
-                            value={conferenteName}
-                            onChange={e => { setConferenteName(e.target.value); setConferenteError(false); }}
-                            placeholder="Nome do conferente"
-                          />
+                          <input className={`w-full border rounded p-2 ${conferenteError ? 'border-red-500 bg-red-50' : ''}`} value={conferenteName} onChange={e => { setConferenteName(e.target.value); setConferenteError(false); }} placeholder="Nome do conferente" />
                           {conferenteError && <p className="text-xs text-red-500 mt-1">Campo obrigatório.</p>}
                       </div>
                   </div>
 
                   <div className="bg-gray-50 p-4 border-t flex justify-end gap-3 shrink-0">
                       <button onClick={() => setIsReturnModalOpen(false)} className="px-4 py-2 text-gray-600 font-bold hover:bg-gray-100 rounded">Cancelar</button>
-                      <button onClick={handleConfirmReturn} className="px-6 py-2 bg-green-600 text-white font-bold rounded hover:bg-green-700 shadow-md">
-                          Confirmar Recebimento
-                      </button>
+                      <button onClick={handleConfirmReturn} className="px-6 py-2 bg-green-600 text-white font-bold rounded hover:bg-green-700 shadow-md">Confirmar Recebimento</button>
                   </div>
               </div>
           </div>

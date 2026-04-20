@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { ProductionOrder, OrderStatus, Product, CuttingJob } from '../types';
 import { ApiService } from '../services/api';
-import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw, AlertTriangle, Trash2, Clock, Ruler, ArrowRight } from 'lucide-react'; // Added ArrowRight
+import { Plus, Printer, FileText, Eye, X, Scissors, Truck, Package, ClipboardCheck, Tag, Grid3X3, CheckCircle, Copy, Edit2, Filter, Search, Calendar, RotateCcw, Layers, ChevronDown, ChevronRight, AlertCircle, LayoutList, Shirt, User, RefreshCw, AlertTriangle, Trash2, Clock, Ruler, ArrowRight, Activity } from 'lucide-react'; // Added Activity
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useDialog } from '../contexts/DialogContext'; // IMPORT DIALOG
@@ -134,7 +134,7 @@ export const ProductionOrderList: React.FC = () => {
   const { data: rawOps = [], isLoading: loadingOps, refetch: refetchOps } = useQuery({
     queryKey: ['productionOrders'],
     queryFn: ApiService.getProductionOrders,
-    staleTime: 1000 * 60 * 2 // 2 mins cache
+    staleTime: 1000 * 60 * 1 // Reduzido cache para 1 min para pegar updates do corte rápido
   });
 
   const { data: products = [], refetch: refetchProds } = useQuery({
@@ -214,6 +214,38 @@ export const ProductionOrderList: React.FC = () => {
     }
   }, [highlightOpId, ops, navigate, location.pathname]);
 
+  // SYNC EFFECT: Update selectedOp when background data changes
+  useEffect(() => {
+      if (selectedOp) {
+          // If it's a regular OP (not a virtual batch), update it from the fresh list
+          if (!selectedOp.id.startsWith('BATCH-')) {
+              const freshOp = ops.find(o => o.id === selectedOp.id);
+              if (freshOp && JSON.stringify(freshOp) !== JSON.stringify(selectedOp)) {
+                  setSelectedOp(freshOp);
+                  
+                  // Also refresh forms to reflect new state
+                  setRevisionForm(freshOp.revisionDetails || { approvedQty: 0, reworkQty: 0, rejectedQty: 0, inspectorName: '' });
+                  setPackingForm(freshOp.packingDetails || { totalBoxes: 0, packingType: 'Caixa Padrão', totalPackedQty: 0 });
+              }
+          } else {
+              // If it's a virtual BATCH, we need to refresh the children
+              // Extract the base lot from the current batch ID
+              const baseLot = selectedOp.lotNumber.split(' ')[0];
+              const freshChildren = ops.filter(o => o.lotNumber.startsWith(baseLot));
+              
+              if (freshChildren.length > 0 && JSON.stringify(freshChildren) !== JSON.stringify(batchChildren)) {
+                  setBatchChildren(freshChildren);
+                  // Update the virtual parent summary as well
+                  const totalQty = freshChildren.reduce((acc, op) => acc + op.quantityTotal, 0);
+                  const allItems = freshChildren.flatMap(op => op.items);
+                  const allEvents = freshChildren.flatMap(op => op.events).sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                  
+                  setSelectedOp(prev => prev ? ({ ...prev, quantityTotal: totalQty, items: allItems, events: allEvents }) : null);
+              }
+          }
+      }
+  }, [ops]); // Runs whenever 'ops' query data updates
+
   const refreshAll = () => {
       refetchOps();
       refetchProds();
@@ -229,6 +261,9 @@ export const ProductionOrderList: React.FC = () => {
     setActiveTab('summary');
     setRevisionForm(op.revisionDetails || { approvedQty: 0, reworkQty: 0, rejectedQty: 0, inspectorName: '' });
     setPackingForm(op.packingDetails || { totalBoxes: 0, packingType: 'Caixa Padrão', totalPackedQty: 0 });
+    
+    // FORCE REFRESH to prevent stale cache issues
+    queryClient.invalidateQueries({ queryKey: ['productionOrders'] });
   };
 
   // --- NEW: Handle Consolidated Batch View ---
@@ -826,7 +861,7 @@ export const ProductionOrderList: React.FC = () => {
                         {/* KPI Cards */}
                         <div className="grid grid-cols-4 gap-4">
                             <div className="bg-white p-4 rounded-lg border shadow-sm">
-                                <div className="text-gray-500 text-xs uppercase font-bold">Total Programado</div>
+                                <div className="text-gray-500 text-xs uppercase font-bold">Total (Grade Real)</div>
                                 <div className="text-2xl font-bold text-blue-600">{selectedOp.quantityTotal} <span className="text-sm text-gray-400">pçs</span></div>
                             </div>
                             <div className="bg-white p-4 rounded-lg border shadow-sm">
@@ -934,7 +969,9 @@ export const ProductionOrderList: React.FC = () => {
                                                     </div>
                                                 )}
                                                 
-                                                <h5 className="text-xs font-bold text-blue-600 mb-1">Grade Real (Atualizada)</h5>
+                                                <h5 className="text-xs font-bold text-blue-600 mb-1 flex items-center gap-1">
+                                                    <Activity size={12}/> Grade Real (Atualizada pelo Corte)
+                                                </h5>
                                                 <SizeColorMatrix items={childOp.items} sizes={getActiveSizes(childOp)} colorsMap={colorsMap}/>
                                             </div>
                                         );
@@ -947,14 +984,19 @@ export const ProductionOrderList: React.FC = () => {
                                     {renderRiskPlanning(selectedOp)}
                                     
                                     {/* Comparison Logic: If Original Items exist, show them */}
-                                    {selectedOp.originalItems && (
-                                        <div className="mb-6 opacity-70 bg-gray-50 p-3 rounded-lg border border-gray-200">
-                                            <h5 className="text-xs font-bold text-gray-500 mb-2 flex items-center gap-1"><AlertTriangle size={12}/> Grade Original (Planejada)</h5>
+                                    {selectedOp.originalItems && selectedOp.originalItems.length > 0 && (
+                                        <div className="mb-6 bg-yellow-50/50 p-3 rounded-lg border border-yellow-100">
+                                            <h5 className="text-xs font-bold text-yellow-700 mb-2 flex items-center gap-1">
+                                                <AlertTriangle size={12}/> Grade Original (Planejada)
+                                                <span className="text-[10px] font-normal text-yellow-600 ml-1">- Diferente da executada</span>
+                                            </h5>
                                             <SizeColorMatrix items={selectedOp.originalItems} sizes={getActiveSizes(selectedOp)} colorsMap={colorsMap}/>
                                         </div>
                                     )}
 
-                                    <h5 className="text-xs font-bold text-blue-600 mb-2 mt-4">Grade Realizada (Atualizada pelo Corte)</h5>
+                                    <h5 className="text-xs font-bold text-blue-600 mb-2 mt-4 flex items-center gap-1">
+                                        <CheckCircle size={12}/> Grade Realizada (Atualizada pelo Corte)
+                                    </h5>
                                     <SizeColorMatrix items={selectedOp.items} sizes={getActiveSizes(selectedOp)} colorsMap={colorsMap}/>
                                 </>
                             )}

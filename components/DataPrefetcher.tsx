@@ -14,7 +14,8 @@ export const DataPrefetcher: React.FC = () => {
 
   useEffect(() => {
     const prefetchData = async () => {
-      // Definição de prioridade: Carrega dados críticos em paralelo
+      // Definição de prioridade: Carrega dados críticos sequencialmente para não sobrecarregar
+      // a rede ou a API free tier.
       const criticalQueries = [
         { key: ['productionOrders'], fn: ApiService.getProductionOrders },
         { key: ['subcontractorOrders'], fn: ApiService.getSubcontractorOrders },
@@ -27,22 +28,19 @@ export const DataPrefetcher: React.FC = () => {
         { key: ['standardOperations'], fn: ApiService.getStandardOperations }
       ];
 
-      // Dispara todas as requisições simultaneamente (Promise.all)
-      // Isso é muito mais rápido do que carregar um por um
-      try {
-        await Promise.all(
-          criticalQueries.map(({ key, fn }) => 
+      // Executa em batches de 3 para não bloquear a thread principal ou a rede
+      const chunkSize = 3;
+      for (let i = 0; i < criticalQueries.length; i += chunkSize) {
+          const chunk = criticalQueries.slice(i, i + chunkSize);
+          await Promise.allSettled(chunk.map(({ key, fn }) => 
             queryClient.prefetchQuery({
               queryKey: key,
               queryFn: fn,
               staleTime: 1000 * 60 * 5, // Considera os dados frescos por 5 minutos
             })
-          )
-        );
-        console.log('🚀 Sistema: Todos os módulos pré-carregados com sucesso.');
-      } catch (error) {
-        console.error('⚠️ Falha no pré-carregamento em segundo plano:', error);
+          ));
       }
+      console.log('🚀 Sistema: Pré-carregamento concluído.');
     };
 
     // Executa imediatamente ao montar o componente
